@@ -68,13 +68,13 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
         if isinstance(summary, dict):
             if model.model.Status == GRB.OPTIMAL:
                 results['status'].append("Optimal")
-            else:
+            elif model.model.Status == GRB.SUBOPTIMAL:
                 results['status'].append("Suboptimal")
+            elif model.model.Status == GRB.TIME_LIMIT:
+                results['status'].append("Time_Limit")
             results['gap'].append(summary.get('gap', 0))
             results['runtime'].append(summary.get('runtime', 0))
-            # Note: cut count is not directly available in CETSPModel, adding 0 as placeholder.
-            # This would require further modification to the model to track.
-            results['cuts'].append(0) 
+            results['cuts'].append(summary.get('cuts_added', 0))
         else:
             results['status'].append("Failed")
             results['gap'].append(float('inf'))

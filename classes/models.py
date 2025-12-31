@@ -246,6 +246,7 @@ class CETSPModel:
                 "runtime": self.runtime,
                 "gap": self.gap,
                 "status": self.status,
+                "cuts_added": self.cuts,
                 "arcs": self.arcs,
                 "points": self.points
             }

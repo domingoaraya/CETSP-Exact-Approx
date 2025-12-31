@@ -6,3 +6,6 @@ Instances/
 
 # Ignore Python cache directories
 __pycache__/
+
+# Ignore Reference files
+References/
