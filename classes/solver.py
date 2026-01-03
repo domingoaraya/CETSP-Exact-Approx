@@ -301,9 +301,9 @@ class CETSP_L2_Solver:
             self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
 
         elif self.model_type == 'seq':
-            if cut_type == 'dual':
+            if 'dual' in cut_type:
                 self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation <= self.theta)
-            elif cut_type == 'enumerative':
+            if 'enumerative' in cut_type:
                 tour_seq = []
                 for i in range(self.n):
                     for k in range(self.n):

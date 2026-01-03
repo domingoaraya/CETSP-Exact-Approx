@@ -85,6 +85,9 @@ class CETSPModel:
                 self.solver._add_benders_cut(x_sol, sub_obj, duals, self.seq_cut_type, current_estimation)
                 if self.seq_cut_type == 'dual' and self.model_type == 'seq':
                     self.cuts += 1
+                elif self.seq_cut_type == 'dual+enumerative' and self.model_type == 'seq':
+                    # Both dual and enumerative cuts are added
+                    self.cuts += 3
                 else:
                     # Enumerative cuts are added in pairs
                     self.cuts += 2

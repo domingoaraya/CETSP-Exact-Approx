@@ -12,6 +12,8 @@ def main():
         "--amount_of_instances", "1",
         "--time_limit", "30", # Short time limit for a quick test
         "--verbosity", "low",
+        # use all three cut types for testing
+        "--seq_cut_type", "dual", "enumerative", "dual+enumerative",
         # Default values for other parameters will be used if not specified here
         # E.g., --r_mean, --sigma, --model_type, --decomposition, --extended, --seq_cut_type
     ]

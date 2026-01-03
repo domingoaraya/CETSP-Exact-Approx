@@ -101,7 +101,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", type=str, nargs='+', default=['arc', 'seq'], choices=['arc', 'seq'], help="List of model types to test.")
     parser.add_argument("--decomposition", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use decomposition (True/False).")
     parser.add_argument("--extended", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use extended formulation (True/False).")
-    parser.add_argument("--seq_cut_type", type=str, nargs='+', default=['dual', 'enumerative'], choices=['dual', 'enumerative'], help="Cut type for sequence model decomposition.")
+    parser.add_argument("--seq_cut_type", type=str, nargs='+', default=['enumerative'], choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for sequence model decomposition.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
 
     args = parser.parse_args()
@@ -143,7 +143,10 @@ if __name__ == "__main__":
         if config['decomposition']:
             formulation_name += "-D"
         if config['seq_cut_type']:
-            formulation_name += f"-{config['seq_cut_type'][:4]}"
+            if config['seq_cut_type'] == 'dual+enumerative':
+                formulation_name += "-DE"
+            else:
+                formulation_name += f"-{config['seq_cut_type'][:4]}"
 
         for n_nodes_val in args.n_nodes:
             for r_mean_val in args.r_mean:
