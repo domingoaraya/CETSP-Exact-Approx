@@ -4,13 +4,15 @@ Results/*
 !Results/paper_results.csv
 
 # Ignore generated instances
-# Instances/
+Instances/*
 
 # Ignore Python cache directories
 __pycache__/
 
 # Ignore Reference files 
 References/
+# !References/README.md
+# !References/sn-article.tex
 
 # Ignore test files
 test_*.py
