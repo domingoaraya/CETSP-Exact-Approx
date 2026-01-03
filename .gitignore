@@ -9,3 +9,6 @@ __pycache__/
 
 # Ignore Reference files
 References/
+
+# Ignore test files
+test_*.py
