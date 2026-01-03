@@ -4,7 +4,7 @@ Results/*
 !Results/paper_results.csv
 
 # Ignore generated instances
-# Instances/
+Instances/
 
 # Ignore Python cache directories
 __pycache__/
