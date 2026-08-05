@@ -33,7 +33,9 @@ class CETSP_L2_Solver:
         """
         self.model.setParam('OutputFlag', 0)
 
-        if self.decomposition:
+        if self.model_type == "B&S":
+            self._build_bs_master_model()
+        elif self.decomposition:
             self._build_decomposition_model()
         else:
             self._create_variables()
@@ -48,12 +50,24 @@ class CETSP_L2_Solver:
 
             self._set_objective()
 
+    def _build_bs_master_model(self):
+        """
+        Builds the master problem for the Behdani & Smith (B&S) formulation.
+        """
+        self._create_variables()
+        self._create_tour_constraints()
+        self._set_objective()
+
     def _create_variables(self):
         """
         Creates the decision variables for the model.
         """
         # Binary variables indicating the sequence of visited regions
         self.x = self.model.addVars(self.n, self.n, vtype=GRB.BINARY, name="x")
+
+        if self.model_type == "B&S":
+            self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb=0)
+            return
 
         if not (self.decomposition and not self.extended):
             # Continuous variables for the coordinates of the points in each region
@@ -83,6 +97,9 @@ class CETSP_L2_Solver:
         self.model.addConstrs((self.x.sum(i, '*') == 1 for i in range(self.n)), name="visit_once")
         # Each position in the tour must be occupied by exactly one region
         self.model.addConstrs((self.x.sum('*', j) == 1 for j in range(self.n)), name="occupy_once")
+        # No self-loops for arc-based and B&S formulations
+        if self.model_type in ['arc', 'B&S']:
+            self.model.addConstrs((self.x[i, i] == 0 for i in range(self.n)), name="no_self_loops")
         
     def _create_neighborhood_constraints(self):
         """
@@ -272,6 +289,68 @@ class CETSP_L2_Solver:
             else:
                 return float('-inf'), {}
 
+        elif self.model_type == 'B&S':
+            sub_model = Model("bs_subproblem")
+            sub_model.setParam('OutputFlag', 0)
+
+            tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
+
+            cells_by_target = {}
+            for i in range(self.n):
+                cells_by_target[i] = [key for key in self.data.bs_cells.keys() if key[0] == i]
+
+            f_vars = {}
+            c_cap = {}
+
+            for i, j in tour_arcs:
+                m_ij = self.estimation[i, j]
+                for delta in cells_by_target[i]:
+                    for sigma in cells_by_target[j]:
+                        d_ds = self.data.bs_distances[(delta, sigma)]
+                        cost = max(d_ds - m_ij, 0.0)
+
+                        f_var = sub_model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, obj=cost, name=f"f_{delta}_{sigma}")
+                        f_vars[(delta, sigma)] = f_var
+                        c_cap[(delta, sigma)] = sub_model.addConstr(f_var <= 1.0, name=f"cap_{delta}_{sigma}")
+
+            for i in range(1, self.n):
+                in_arcs = [(k, i_arc) for (k, i_arc) in tour_arcs if i_arc == i]
+                out_arcs = [(i_arc, j) for (i_arc, j) in tour_arcs if i_arc == i]
+
+                for delta in cells_by_target[i]:
+                    in_flow = quicksum(f_vars[(sigma, delta)] for k, _ in in_arcs for sigma in cells_by_target[k] if (sigma, delta) in f_vars)
+                    out_flow = quicksum(f_vars[(delta, sigma)] for _, j in out_arcs for sigma in cells_by_target[j] if (delta, sigma) in f_vars)
+                    sub_model.addConstr(in_flow - out_flow == 0, name=f"flow_cons_{delta}")
+
+            depot_out_arcs = [(i_arc, j) for (i_arc, j) in tour_arcs if i_arc == 0]
+            depot_in_arcs = [(k, j_arc) for (k, j_arc) in tour_arcs if j_arc == 0]
+
+            source_flow = quicksum(f_vars[(delta, sigma)] for _, j in depot_out_arcs for delta in cells_by_target[0] for sigma in cells_by_target[j] if (delta, sigma) in f_vars)
+            sub_model.addConstr(source_flow == 1.0, name="source_flow")
+
+            sink_flow = quicksum(f_vars[(delta, sigma)] for k, _ in depot_in_arcs for delta in cells_by_target[k] for sigma in cells_by_target[0] if (delta, sigma) in f_vars)
+            sink_constr = sub_model.addConstr(sink_flow == 1.0, name="sink_flow")
+
+            sub_model.optimize()
+
+            if sub_model.status in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
+                sub_obj = sub_model.objVal
+                pi_tau = sink_constr.Pi
+                gamma = {}
+                f_sol = {}
+                for key, cap_c in c_cap.items():
+                    gamma[key] = max(-cap_c.Pi, 0.0)
+                    f_sol[key] = f_vars[key].X
+
+                duals = {
+                    'pi_tau': pi_tau,
+                    'gamma': gamma,
+                    'f_sol': f_sol
+                }
+                return sub_obj, duals
+            else:
+                return float('inf'), {}
+
     def _add_benders_cut(self, x_sol, sub_obj, duals, cut_type='enumerative', current_estimation=None):
         """
         Adds a Benders cut to the master problem.
@@ -321,6 +400,56 @@ class CETSP_L2_Solver:
                 
                 self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
                 self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+
+        elif self.model_type == 'B&S':
+            lhs, rhs = self._generate_bs_cut_expr(x_sol, duals)
+            if lhs is not None:
+                self.model.cbLazy(lhs >= rhs)
+
+    def _generate_bs_cut_expr(self, x_sol, duals):
+        """
+        Generates the linear expression (LHS) and bound (RHS) for a Behdani & Smith (B&S) cut.
+        Does not interact directly with the Gurobi model or callbacks.
+
+        Args:
+            x_sol (dict): Binary arc solution mapping (i, j) to 0 or 1.
+            duals (dict): The dual variables from the subproblem.
+
+        Returns:
+            tuple: (lhs, rhs) where lhs is a Gurobi LinExpr and rhs is a float, or (None, None) if invalid.
+        """
+        if not duals or 'pi_tau' not in duals:
+            return None, None
+
+        pi_tau = duals.get('pi_tau', 0.0)
+        gamma = duals.get('gamma', {})
+
+        inactive_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and x_sol.get((i, j), 0) <= 0.5]
+
+        eta = {}
+        eta_bar = {}
+        for i, j in inactive_arcs:
+            cells_i = [key for key in self.data.bs_cells.keys() if key[0] == i]
+            cells_j = [key for key in self.data.bs_cells.keys() if key[0] == j]
+            eta_ij = sum(gamma.get((d, s), 0.0) for d in cells_i for s in cells_j)
+            eta[(i, j)] = eta_ij
+            eta_bar[(i, j)] = min(eta_ij, pi_tau)
+
+        rho = min(eta_bar.values()) if eta_bar else 0.0
+
+        if 2.0 * rho <= pi_tau:
+            # Case A
+            u01 = [arc for arc in inactive_arcs if eta_bar[arc] >= pi_tau - rho]
+            u02 = [arc for arc in inactive_arcs if eta_bar[arc] < pi_tau - rho]
+
+            lhs = self.theta + quicksum((pi_tau - rho) * self.x[i, j] for i, j in u01) + quicksum(eta_bar[i, j] * self.x[i, j] for i, j in u02)
+            rhs = pi_tau - rho
+        else:
+            # Case B
+            lhs = self.theta + quicksum((pi_tau / 2.0) * self.x[i, j] for i, j in inactive_arcs)
+            rhs = pi_tau / 2.0
+
+        return lhs, rhs
 
 
     def _create_arc_formulation_specific_parts(self):
@@ -383,6 +512,11 @@ class CETSP_L2_Solver:
         """
         Sets the objective function for the model.
         """
+        if self.model_type == 'B&S':
+            self._compute_distance_estimations()
+            self.model.setObjective(quicksum(self.x[i,j]*self.estimation[i,j] for i in range(self.n) for j in range(self.n)) + self.theta, GRB.MINIMIZE)
+            return
+
         if not self.decomposition:
             if self.model_type == 'arc':
                 self.model.setObjective(self.d_aux.sum(), GRB.MINIMIZE)
@@ -400,3 +534,4 @@ class CETSP_L2_Solver:
                     self.model.setObjective(self.d_aux.sum() + self.theta, GRB.MINIMIZE)
                 elif self.model_type == 'seq':
                     self.model.setObjective(self.d.sum() + self.theta, GRB.MINIMIZE)
+
