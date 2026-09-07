@@ -19,8 +19,16 @@ class CETSPData:
             radii (dict): A dictionary mapping region indices to their radii (e.g., {0: r0, 1: r1, ...}).
         """
         self.n = n
-        self.centers = centers
-        self.radii = radii
+
+        if isinstance(centers, (list, np.ndarray)):
+            self.centers = {i: tuple(centers[i]) for i in range(n)}
+        else:
+            self.centers = centers
+        if isinstance(radii, (list, np.ndarray)):
+            self.radii = {i: float(radii[i]) for i in range(n)}
+        else:
+            self.radii = radii
+
         self.redundancies = []
         self.min_coord_x = None
         self.max_coord_x = None
@@ -44,6 +52,8 @@ class CETSPData:
         A region is considered redundant if it is completely contained within another region.
         This method updates the number of regions, centers, and radii to reflect the non-redundant set.
         """
+
+        self.redundancies = []
         
         for i in range(self.n):
             for j in range(self.n):

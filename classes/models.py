@@ -1,5 +1,6 @@
 import time
 from gurobipy import Model, GRB, quicksum
+import networkx as nx
 from classes.data_handling import CETSPData
 from classes.solver import CETSP_L2_Solver
 
@@ -9,34 +10,41 @@ class CETSPModel:
     This class orchestrates the data handling, model building, and optimization process.
     """
 
-    def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, seq_cut_type: str = 'enumerative'):
+    def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False):
         """
         Initializes the CETSPModel.
 
         Args:
             data (CETSPData): The data for the CETSP instance.
-            model_type (str): The type of model to build ('arc', 'seq', or 'B&S').
+            model_type (str): The type of model to build ('arc', 'seq', 'perspective', or 'B&S').
             decomposition (bool): Whether to use Benders decomposition. Defaults to False.
             extended (bool): Whether to use the extended formulation for the L2 norm. Defaults to False.
             nu (int, optional): The parameter for the extended formulation. Defaults to 3.
-            seq_cut_type (str, optional): The type of cut for the sequence model ('dual' or 'enumerative'). Defaults to 'enumerative'.
+            cut_type (str, optional): The type of cut for decompositions ('dual' or 'enumerative'). Defaults to 'enumerative'.
+            strengthen (bool): Whether to use DFJ cut separation at the root node. Defaults to False.
         """
         self.data = data
         self.model_type = model_type
         self.decomposition = decomposition
         self.extended = extended
         self.nu = nu
-        self.seq_cut_type = seq_cut_type
+        self.cut_type = cut_type if cut_type is not None else 'enumerative'
+        self.strengthen = strengthen
         self.model = Model("CETSP")
         self.solver = None
-        self.solution = None
+        self.upper_bound = None
+        self.lower_bound = None
+        self.root_bound = None
+        self.node_count = None
         self.runtime = None
         self.gap = None
         self.arcs = None
         self.points = None
         self.cuts = 0
+        self.dfj_cuts = 0
         self.status = None
         self.bs_history = []
+        self.G = None
 
     def build(self):
         """
@@ -45,6 +53,16 @@ class CETSPModel:
         self.data.eliminate_redundancies()
         self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu)
         self.solver.build()
+
+        # Initialize NetworkX graph for DFJ separation
+        if self.strengthen and self.model_type in ['arc', 'perspective']:
+            n = self.data.n
+            self.G = nx.DiGraph()
+            self.G.add_nodes_from(range(n))
+            self.G.add_edges_from(
+                (i, j) for i in range(n) for j in range(n) if i != j
+            )
+            nx.set_edge_attributes(self.G, 0.0, 'capacity')
 
     def optimize(self, time_limit: int = 600, max_iterations: int = 5):
         """
@@ -60,12 +78,19 @@ class CETSPModel:
 
         try:
             self.model.setParam('TimeLimit', time_limit)
+            # PreCrush is required for cbCut() to work with presolved model
+            if self.strengthen and self.model_type in ['arc', 'perspective']:
+                self.model.Params.PreCrush = 1
+
+            #use_callback = self.decomposition or (self.strengthen and self.model_type in ['arc', 'perspective'])
             if self.decomposition:
-                # The Benders loop is managed via a callback
+                # LazyConstraints is only needed for cbLazy (decomposition/Benders cuts)
                 self.model.Params.LazyConstraints = 1
-                self.model.optimize(self._benders_callback)
-            else:
-                self.model.optimize()
+
+            #if use_callback:
+            self.model.optimize(self._unified_callback)
+            #else:
+            #    self.model.optimize()
             
             self.runtime = self.model.Runtime
             self._retrieve_solution()
@@ -96,7 +121,7 @@ class CETSPModel:
 
             cuts_before = self.cuts
             self.model.setParam('TimeLimit', max(time_remaining, 0.1))
-            self.model.optimize(self._benders_callback)
+            self.model.optimize(self._unified_callback)
 
             self.status = self.model.status
             if self.model.status == GRB.TIME_LIMIT or self.model.solCount == 0:
@@ -144,23 +169,25 @@ class CETSPModel:
                     self.cuts += 1
 
         self.runtime = time.time() - start_time
+        self.lower_bound = self.model.ObjBound
 
         if self.model.solCount > 0:
             x_sol = self.model.getAttr('X', self.solver.x)
             ub_obj_val, ub_arcs, ub_points = self.compute_upper_bound(x_sol)
 
             if ub_obj_val != float('inf'):
-                self.solution = ub_obj_val
+                self.upper_bound = ub_obj_val
                 self.arcs = ub_arcs
                 self.points = ub_points
-                if self.model.objVal > 0:
-                    self.gap = (ub_obj_val - self.model.objVal) / ub_obj_val
+                if self.upper_bound > 0:
+                    self.gap = (self.upper_bound - self.lower_bound) / self.upper_bound
                 else:
                     self.gap = 0.0
             else:
-                self.solution = self.model.objVal
-                self.gap = self.model.MIPGap
-                self._extract_arcs_and_points()
+                # self.solution = self.model.objVal
+                # self.gap = self.model.MIPGap
+                # self._extract_arcs_and_points()
+                raise Exception("The upper bound model could not be solved.")
 
     def _find_subtours(self, x_sol):
         """
@@ -198,40 +225,104 @@ class CETSPModel:
 
         return subtours
 
-    def _benders_callback(self, model, where):
+    def _unified_callback(self, model, where):
         """
-        Gurobi callback to add Subtour Elimination Constraints and Benders cuts.
+        Gurobi callback for lazy constraints (MIPSOL) and DFJ user cuts (MIPNODE).
         """
         if where == GRB.Callback.MIPSOL:
-            x_sol = model.cbGetSolution(self.solver.x)
+            # Only run subproblem / Benders logic for decomposition or B&S models
+            if self.decomposition or self.model_type == 'B&S':
+                x_sol = model.cbGetSolution(self.solver.x)
 
-            # 1. Subtour Check FIRST for B&S model
-            if self.model_type == 'B&S':
-                subtours = self._find_subtours(x_sol)
-                if len(subtours) > 1:
-                    for S in subtours:
-                        model.cbLazy(quicksum(self.solver.x[i, j] for i in S for j in S) <= len(S) - 1)
-                    return # EXIT IMMEDIATELY - Do not run Benders Subproblem on disconnected tours!
-
-            # 2. Benders Subproblem Execution (Only reached if tour is fully connected)
-            current_objective = model.cbGet(GRB.Callback.MIPSOL_OBJ)
-            current_estimation = current_objective - model.cbGetSolution(self.solver.theta)
-            
-            # Solve the subproblem
-            sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
-
-            if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
-                self.solver._add_benders_cut(x_sol, sub_obj, duals, self.seq_cut_type, current_estimation)
+                # 1. Subtour Check FIRST for B&S model
                 if self.model_type == 'B&S':
-                    self.cuts += 1
-                elif self.seq_cut_type == 'dual' and self.model_type == 'seq':
-                    self.cuts += 1
-                elif self.seq_cut_type == 'dual+enumerative' and self.model_type == 'seq':
-                    # Both dual and enumerative cuts are added
-                    self.cuts += 3
-                else:
-                    # Enumerative cuts are added in pairs
-                    self.cuts += 2
+                    subtours = self._find_subtours(x_sol)
+                    if len(subtours) > 1:
+                        for S in subtours:
+                            model.cbLazy(quicksum(self.solver.x[i, j] for i in S for j in S) <= len(S) - 1)
+                            self.dfj_cuts += 1
+                        return  # EXIT IMMEDIATELY - Do not run subproblem on disconnected tours
+
+                # 2. Subproblem Execution (Only reached if tour is fully connected)
+                current_objective = model.cbGet(GRB.Callback.MIPSOL_OBJ)
+                current_estimation = current_objective - model.cbGetSolution(self.solver.theta)
+                
+                # Extract d_sol for PBF extended decomposition
+                d_sol = model.cbGetSolution(self.solver.d) if self.model_type == 'perspective' and self.extended else None
+
+                # Solve the subproblem
+                sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation, d_sol)
+
+                if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
+                    self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
+                    if self.model_type == 'B&S':
+                        self.cuts += 1
+                    elif self.cut_type == 'dual' and self.model_type in ['seq', 'perspective']:
+                        self.cuts += 1
+                    elif self.cut_type == 'dual+enumerative' and self.model_type in ['seq', 'perspective']:
+                        # Both dual and enumerative cuts are added
+                        self.cuts += 3
+                    else:
+                        # Enumerative cuts are added in pairs
+                        self.cuts += 2
+
+        elif where == GRB.Callback.MIPNODE:
+            if model.cbGet(GRB.Callback.MIPNODE_NODCNT) == 0:
+                self.root_bound = model.cbGet(GRB.Callback.MIPNODE_OBJBND)
+
+            # DFJ fractional separation at the root node
+            if not (self.strengthen and self.model_type in ['arc', 'perspective']):
+                return
+
+            # Only separate at the root node with an optimal relaxation
+            if (model.cbGet(GRB.Callback.MIPNODE_NODCNT) != 0 or
+                    model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL):
+                return
+
+            DFJ_TOP_K = 1  # Number of most-violated DFJ cuts to inject per callback
+
+            n = self.data.n
+            x_frac = model.cbGetNodeRel(self.solver.x)
+
+            # Bulk-update edge capacities from fractional solution
+            capacities = {
+                (i, j): x_frac[i, j]
+                for i in range(n) for j in range(n) if i != j
+            }
+            nx.set_edge_attributes(self.G, capacities, 'capacity')
+
+            # Find all violated subsets via min s-t cuts from depot (s=0)
+            violated = []
+            for t in range(1, n):
+                cut_value, partition = nx.minimum_cut(self.G, 0, t, capacity='capacity')
+                if cut_value < 1 - 1e-4:
+                    S = frozenset(partition[1])  # sink side (contains t)
+                    violation = 1.0 - cut_value
+                    violated.append((S, violation))
+
+            if not violated:
+                return
+
+            # Deduplicate identical subsets, keeping max violation
+            unique = {}
+            for S, viol in violated:
+                if S not in unique or viol > unique[S]:
+                    unique[S] = viol
+
+            # Top-K filtering: pick the most violated unique subsets
+            top_k = sorted(unique.items(), key=lambda item: item[1], reverse=True)[:DFJ_TOP_K]
+
+            # Inject DFJ cut-set inequalities: sum_{i in S, j not in S} x_{ij} >= 1
+            N = set(range(n))
+            for S, _ in top_k:
+                S_complement = N - S
+                model.cbCut(
+                    quicksum(
+                        self.solver.x[i, j]
+                        for i in S for j in S_complement
+                    ) >= 1
+                )
+                self.dfj_cuts += 1
 
     def compute_upper_bound(self, x_sol):
         """
@@ -245,7 +336,7 @@ class CETSPModel:
         """
         ub_model = Model("UB_Model")
         ub_model.setParam('OutputFlag', 0)
-        model_type_ub = 'arc' if self.model_type in ['arc', 'B&S'] else 'seq'
+        model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'B&S'] else 'seq')
         ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub)
         ub_solver.build()
 
@@ -265,7 +356,7 @@ class CETSPModel:
             # Retrieve x solution from ub_model
             ub_x_sol = ub_model.getAttr('X', ub_solver.x)
 
-            if model_type_ub == 'arc':
+            if model_type_ub in ['arc', 'perspective']:
                 for i in range(self.data.n):
                     for j in range(self.data.n):
                         if ub_x_sol[i, j] > 0.5:
@@ -293,6 +384,12 @@ class CETSPModel:
                     for k in range(self.data.n):
                         i = tour_sequence[k]
                         points[i] = (ub_p_x_sol[k], ub_p_y_sol[k])
+            elif model_type_ub == 'perspective' and hasattr(ub_solver, 'p_i'):
+                ub_p_i_sol = ub_model.getAttr('X', ub_solver.p_i)
+                for i in range(self.data.n):
+                    for j in range(self.data.n):
+                        if ub_x_sol[i, j] > 0.5:
+                            points[i] = (ub_p_i_sol[i, j, 0], ub_p_i_sol[i, j, 1])
             
             return ub_model.objVal, arcs, points
         else:
@@ -305,37 +402,36 @@ class CETSPModel:
         if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL]:
 
             self.status = self.model.status
+            self.lower_bound = self.model.ObjBound
 
             if self.model.solCount > 0:
-                self.solution = self.model.objVal
-                self.gap = self.model.MIPGap
-
                 x_sol = self.model.getAttr('X', self.solver.x)
 
                 if self.extended and not self.decomposition:
                     # For extended formulations without decomposition, solve an exact SOCP to get the feasible solution
                     ub_obj_val, ub_arcs, ub_points = self.compute_upper_bound(x_sol)
-                    
-                    self.solution = ub_obj_val
+                    self.upper_bound = ub_obj_val
                     self.arcs = ub_arcs
                     self.points = ub_points
-                    
-                    # Recalculate gap
-                    if ub_obj_val != float('inf') and self.model.objVal > 0:
-                        self.gap = (ub_obj_val - self.model.objVal) / ub_obj_val
-                    else:
-                        self.gap = float('inf')
-                
-                elif self.decomposition and not self.extended:
-                    # For non-extended decompositions, we have the binary variables but not the points.
-                    # We solve the subproblem one last time to get the points for plotting.
-                    _, self.arcs, self.points = self.compute_upper_bound(x_sol)
-
                 else:
-                    # For other cases (non-extended non-decomposed, or extended-decomposed), extract from the main model.
+                    # For all other formulations the model objective is the true UB.
+                    self.upper_bound = self.model.ObjVal
                     self._extract_arcs_and_points()
+
+                    if self.decomposition and not self.extended:
+                        # For non-extended decompositions, extract points for plotting without overriding the upper bound.
+                        _, _, plot_points = self.compute_upper_bound(x_sol)
+                        if plot_points:
+                            self.points = plot_points
+
+                # Recalculate gap robustly
+                if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
+                    self.gap = (self.upper_bound - self.lower_bound) / self.upper_bound
+                else:
+                    self.gap = float('inf')
             else:
-                print("No feasible solution found.")
+                self.upper_bound = float('inf')
+                self.gap = float('inf')
         else:
             print(f"Optimization ended with status: {self.model.status}")
 
@@ -367,6 +463,13 @@ class CETSPModel:
             for k in range(self.data.n - 1):
                 self.arcs.append((tour_sequence[k], tour_sequence[k+1]))
             self.arcs.append((tour_sequence[self.data.n - 1], tour_sequence[0]))
+        elif self.model_type == 'perspective':
+            p_i_sol = self.model.getAttr('X', self.solver.p_i)
+            for i in range(self.data.n):
+                for j in range(self.data.n):
+                    if i != j and x_sol[i, j] > 0.5:
+                        self.arcs.append((i, j))
+                        self.points[i] = (p_i_sol[i, j, 0], p_i_sol[i, j, 1])
 
         # Extract points if they exist in the model
         if hasattr(self.solver, 'p_x') and hasattr(self.solver, 'p_y'):
@@ -384,13 +487,17 @@ class CETSPModel:
         """
         Returns a summary of the solution.
         """
-        if self.solution is not None:
+        if self.upper_bound is not None:
             return {
-                "objective_value": self.solution,
+                "upper_bound": self.upper_bound,
+                "lower_bound": self.lower_bound,
+                "root_bound": self.root_bound,
+                "node_count": self.node_count,
                 "runtime": self.runtime,
                 "gap": self.gap,
                 "status": self.status,
                 "cuts_added": self.cuts,
+                "dfj_cuts": self.dfj_cuts,
                 "arcs": self.arcs,
                 "points": self.points
             }

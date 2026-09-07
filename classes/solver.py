@@ -45,6 +45,8 @@ class CETSP_L2_Solver:
                 self._create_arc_formulation_specific_parts()
             elif self.model_type == "seq":
                 self._create_seq_formulation_specific_parts()
+            elif self.model_type == "perspective":
+                self._create_perspective_formulation_specific_parts()
             else:
                 raise ValueError("Invalid model type specified.")
 
@@ -69,21 +71,26 @@ class CETSP_L2_Solver:
             self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb=0)
             return
 
-        if not (self.decomposition and not self.extended):
-            # Continuous variables for the coordinates of the points in each region
-            self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
-            self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+        if self.model_type == "perspective":
+            self.p_i = self.model.addVars(self.n, self.n, 2, lb=-GRB.INFINITY, name="p_i")
+            self.p_j = self.model.addVars(self.n, self.n, 2, lb=-GRB.INFINITY, name="p_j")
+            self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
+        else:
+            if not (self.decomposition and not self.extended):
+                # CONTINUOUS variables for the coordinates of the points in each region
+                self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
+                self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
 
-        if self.model_type == "arc":
-            # Continuous variables for the distance between points
-            if not (self.decomposition and not self.extended):
-                self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
-            # Auxiliary variables for the linearized objective function
-            self.d_aux = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d_aux")
-        elif self.model_type == "seq":
-            # Continuous variables for the distance between points
-            if not (self.decomposition and not self.extended):
-                self.d = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, name="d")
+            if self.model_type == "arc":
+                # CONTINUOUS variables for the distance between points
+                if not (self.decomposition and not self.extended):
+                    self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
+                # Auxiliary variables for the linearized objective function
+                self.d_aux = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d_aux")
+            elif self.model_type == "seq":
+                # CONTINUOUS variables for the distance between points
+                if not (self.decomposition and not self.extended):
+                    self.d = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, name="d")
         
         if self.decomposition:
             self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb = 0)
@@ -97,8 +104,8 @@ class CETSP_L2_Solver:
         self.model.addConstrs((self.x.sum(i, '*') == 1 for i in range(self.n)), name="visit_once")
         # Each position in the tour must be occupied by exactly one region
         self.model.addConstrs((self.x.sum('*', j) == 1 for j in range(self.n)), name="occupy_once")
-        # No self-loops for arc-based and B&S formulations
-        if self.model_type in ['arc', 'B&S']:
+        # No self-loops for arc-based, B&S, and perspective formulations
+        if self.model_type in ['arc', 'B&S', 'perspective']:
             self.model.addConstrs((self.x[i, i] == 0 for i in range(self.n)), name="no_self_loops")
         
     def _create_neighborhood_constraints(self):
@@ -114,6 +121,9 @@ class CETSP_L2_Solver:
                                       (self.p_y[k] - quicksum(self.x[i, k] * self.data.centers[i][1] for i in range(self.n)))**2 <=
                                       quicksum(self.x[i, k] * self.data.radii[i] for i in range(self.n))**2
                                       for k in range(self.n)), name="neighborhood")
+            elif self.model_type == 'perspective':
+                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_i_perspective")
+                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_j_perspective")
         else:
             self._create_approximated_socp_constraints('neighborhood')
 
@@ -128,6 +138,8 @@ class CETSP_L2_Solver:
             elif self.model_type == 'seq':
                 self.model.addConstrs((self.d[k]**2 >= (self.p_x[k] - self.p_x[k+1])**2 + (self.p_y[k] - self.p_y[k+1])**2 for k in range(self.n - 1)), name="distance")
                 self.model.addConstr((self.d[self.n - 1]**2 >= (self.p_x[self.n - 1] - self.p_x[0])**2 + (self.p_y[self.n - 1] - self.p_y[0])**2), name="distance_wrap_around")
+            elif self.model_type == 'perspective':
+                self.model.addConstrs((self.d[i, j]**2 >= (self.p_i[i, j, 0] - self.p_j[i, j, 0])**2 + (self.p_i[i, j, 1] - self.p_j[i, j, 1])**2 for i in range(self.n) for j in range(self.n) if i != j), name="distance_perspective")
         else:
             self._create_approximated_socp_constraints('distance')
 
@@ -139,30 +151,69 @@ class CETSP_L2_Solver:
             constraint_type (str): The type of constraint to approximate ('neighborhood' or 'distance').
         """
         if constraint_type == 'neighborhood':
-            xi_c = self.model.addVars(self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_c")
-            eta_c = self.model.addVars(self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_c")
+            if self.model_type in ['arc', 'seq']:
+                xi_c = self.model.addVars(self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_c")
+                eta_c = self.model.addVars(self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_c")
 
-            self.model.addConstrs(xi_c[k,j] == np.cos(np.pi * 2**(-(j+1))) * xi_c[k,j-1] + np.sin(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
-            self.model.addConstrs(eta_c[k,j] >= -np.sin(np.pi * 2**(-(j+1))) * xi_c[k,j-1] + np.cos(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
-            self.model.addConstrs(eta_c[k,j] >= np.sin(np.pi * 2**(-(j+1))) * xi_c[k,j-1] - np.cos(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
+                self.model.addConstrs(xi_c[k,j] == np.cos(np.pi * 2**(-(j+1))) * xi_c[k,j-1] + np.sin(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c[k,j] >= -np.sin(np.pi * 2**(-(j+1))) * xi_c[k,j-1] + np.cos(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c[k,j] >= np.sin(np.pi * 2**(-(j+1))) * xi_c[k,j-1] - np.cos(np.pi * 2**(-(j+1))) * eta_c[k,j-1] for k in range(self.n) for j in range(1, self.nu + 1))
 
-            self.model.addConstrs(eta_c[k,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_c[k,self.nu] for k in range(self.n))
+                self.model.addConstrs(eta_c[k,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_c[k,self.nu] for k in range(self.n))
 
-            if self.model_type == 'arc':
-                self.model.addConstrs(xi_c[i,0] >= self.p_x[i] - self.data.centers[i][0] for i in range(self.n))
-                self.model.addConstrs(xi_c[i,0] >= -self.p_x[i] + self.data.centers[i][0] for i in range(self.n))
-                self.model.addConstrs(eta_c[i,0] >= self.p_y[i] - self.data.centers[i][1] for i in range(self.n))
-                self.model.addConstrs(eta_c[i,0] >= -self.p_y[i] + self.data.centers[i][1] for i in range(self.n))
+                if self.model_type == 'arc':
+                    self.model.addConstrs(xi_c[i,0] >= self.p_x[i] - self.data.centers[i][0] for i in range(self.n))
+                    self.model.addConstrs(xi_c[i,0] >= -self.p_x[i] + self.data.centers[i][0] for i in range(self.n))
+                    self.model.addConstrs(eta_c[i,0] >= self.p_y[i] - self.data.centers[i][1] for i in range(self.n))
+                    self.model.addConstrs(eta_c[i,0] >= -self.p_y[i] + self.data.centers[i][1] for i in range(self.n))
 
-                self.model.addConstrs(xi_c[i,self.nu] <= self.data.radii[i] for i in range(self.n))
+                    self.model.addConstrs(xi_c[i,self.nu] <= self.data.radii[i] for i in range(self.n))
 
-            elif self.model_type == 'seq':
-                self.model.addConstrs(xi_c[k,0] >= sum(self.x[i,k]*self.data.centers[i][0] for i in range(self.n)) - self.p_x[k] for k in range(self.n))
-                self.model.addConstrs(xi_c[k,0] >= -sum(self.x[i,k]*self.data.centers[i][0] for i in range(self.n)) + self.p_x[k] for k in range(self.n))
-                self.model.addConstrs(eta_c[k,0] >= sum(self.x[i,k]*self.data.centers[i][1] for i in range(self.n)) - self.p_y[k] for k in range(self.n))
-                self.model.addConstrs(eta_c[k,0] >= -sum(self.x[i,k]*self.data.centers[i][1] for i in range(self.n)) + self.p_y[k] for k in range(self.n))
+                elif self.model_type == 'seq':
+                    self.model.addConstrs(xi_c[k,0] >= sum(self.x[i,k]*self.data.centers[i][0] for i in range(self.n)) - self.p_x[k] for k in range(self.n))
+                    self.model.addConstrs(xi_c[k,0] >= -sum(self.x[i,k]*self.data.centers[i][0] for i in range(self.n)) + self.p_x[k] for k in range(self.n))
+                    self.model.addConstrs(eta_c[k,0] >= sum(self.x[i,k]*self.data.centers[i][1] for i in range(self.n)) - self.p_y[k] for k in range(self.n))
+                    self.model.addConstrs(eta_c[k,0] >= -sum(self.x[i,k]*self.data.centers[i][1] for i in range(self.n)) + self.p_y[k] for k in range(self.n))
 
-                self.model.addConstrs(xi_c[k,self.nu] <= sum(self.x[i,k]*self.data.radii[i] for i in range(self.n)) for k in range(self.n))
+                    self.model.addConstrs(xi_c[k,self.nu] <= sum(self.x[i,k]*self.data.radii[i] for i in range(self.n)) for k in range(self.n))
+
+            elif self.model_type == 'perspective':
+                # Neighborhood cone for node i: ||p_i^{ij} - x_{ij} c_i|| <= x_{ij} r_i
+                xi_c_i = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_c_i")
+                eta_c_i = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_c_i")
+                # Neighborhood cone for node j: ||p_j^{ij} - x_{ij} c_j|| <= x_{ij} r_j
+                xi_c_j = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_c_j")
+                eta_c_j = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_c_j")
+
+                # Rotation layers for xi_c_i and eta_c_i
+                self.model.addConstrs(xi_c_i[i,j,k] == np.cos(np.pi * 2**(-(k+1))) * xi_c_i[i,j,k-1] + np.sin(np.pi * 2**(-(k+1))) * eta_c_i[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c_i[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_c_i[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_c_i[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c_i[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_c_i[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_c_i[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+
+                # Rotation layers for xi_c_j and eta_c_j
+                self.model.addConstrs(xi_c_j[i,j,k] == np.cos(np.pi * 2**(-(k+1))) * xi_c_j[i,j,k-1] + np.sin(np.pi * 2**(-(k+1))) * eta_c_j[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c_j[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_c_j[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_c_j[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_c_j[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_c_j[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_c_j[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+
+                # Base layer (k=0) for node i
+                self.model.addConstrs(xi_c_i[i,j,0] >= self.p_i[i,j,0] - self.x[i,j] * self.data.centers[i][0] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(xi_c_i[i,j,0] >= -(self.p_i[i,j,0] - self.x[i,j] * self.data.centers[i][0]) for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_i[i,j,0] >= self.p_i[i,j,1] - self.x[i,j] * self.data.centers[i][1] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_i[i,j,0] >= -(self.p_i[i,j,1] - self.x[i,j] * self.data.centers[i][1]) for i in range(self.n) for j in range(self.n) if i != j)
+
+                # Base layer (k=0) for node j
+                self.model.addConstrs(xi_c_j[i,j,0] >= self.p_j[i,j,0] - self.x[i,j] * self.data.centers[j][0] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(xi_c_j[i,j,0] >= -(self.p_j[i,j,0] - self.x[i,j] * self.data.centers[j][0]) for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_j[i,j,0] >= self.p_j[i,j,1] - self.x[i,j] * self.data.centers[j][1] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_j[i,j,0] >= -(self.p_j[i,j,1] - self.x[i,j] * self.data.centers[j][1]) for i in range(self.n) for j in range(self.n) if i != j)
+
+                # Bounding layer (k=nu) for node i
+                self.model.addConstrs(xi_c_i[i,j,self.nu] <= self.data.radii[i] * self.x[i,j] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_i[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_c_i[i,j,self.nu] for i in range(self.n) for j in range(self.n) if i != j)
+
+                # Bounding layer (k=nu) for node j
+                self.model.addConstrs(xi_c_j[i,j,self.nu] <= self.data.radii[j] * self.x[i,j] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_c_j[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_c_j[i,j,self.nu] for i in range(self.n) for j in range(self.n) if i != j)
         
         elif constraint_type == 'distance':
             if self.model_type == 'arc':
@@ -201,13 +252,33 @@ class CETSP_L2_Solver:
                 self.model.addConstrs(xi_d[k,self.nu] <= self.d[k] for k in range(self.n))
                 self.model.addConstrs(eta_d[k,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[k,self.nu] for k in range(self.n))
 
+            elif self.model_type == 'perspective':
+                # Distance cone: ||p_i^{ij} - p_j^{ij}|| <= d_{ij}
+                xi_d = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_d")
+                eta_d = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_d")
+
+                # Rotation layers
+                self.model.addConstrs(xi_d[i,j,k] == np.cos(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.sin(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_d[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_d[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) if i != j for k in range(1, self.nu + 1))
+
+                # Base layer (k=0)
+                self.model.addConstrs(xi_d[i,j,0] >= self.p_i[i,j,0] - self.p_j[i,j,0] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(xi_d[i,j,0] >= -(self.p_i[i,j,0] - self.p_j[i,j,0]) for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_d[i,j,0] >= self.p_i[i,j,1] - self.p_j[i,j,1] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_d[i,j,0] >= -(self.p_i[i,j,1] - self.p_j[i,j,1]) for i in range(self.n) for j in range(self.n) if i != j)
+
+                # Bounding layer (k=nu)
+                self.model.addConstrs(xi_d[i,j,self.nu] <= self.d[i,j] for i in range(self.n) for j in range(self.n) if i != j)
+                self.model.addConstrs(eta_d[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[i,j,self.nu] for i in range(self.n) for j in range(self.n) if i != j)
+
     def _build_decomposition_model(self):
         """
         Builds the master problem for the Benders decomposition.
         """
         self._create_variables()
         self._create_tour_constraints()
-        if self.model_type == "arc":
+        if self.model_type in ['arc', 'perspective']:
             self._create_subtour_elimination_constraints()
         elif self.model_type == "seq":
             self.model.addConstr(self.x[0, 0] == 1, name="fix_start")
@@ -217,16 +288,19 @@ class CETSP_L2_Solver:
                 self._create_arc_formulation_specific_parts()
             elif self.model_type == "seq":
                 self._create_seq_formulation_specific_parts()
+            elif self.model_type == "perspective":
+                self._create_perspective_formulation_specific_parts()
 
         self._set_objective()
         
-    def _solve_subproblem(self, x_sol, current_estimation):
+    def _solve_subproblem(self, x_sol, current_estimation, d_sol=None):
         """
         Solves the subproblem for a given integer solution.
 
         Args:
             x_sol (dict): A dictionary with the values of the x variables.
             current_estimation (float): The current distance estimation from the master problem.
+            d_sol (dict): The distance variable values (used by the CBF extended decomposition).
 
         Returns:
             A tuple containing the subproblem objective value and the dual variables.
@@ -286,6 +360,77 @@ class CETSP_L2_Solver:
 
             if sub_model.status == GRB.OPTIMAL:
                 return sub_model.objVal, sub_model.getAttr('X', mu)
+            else:
+                return float('-inf'), {}
+
+        elif self.model_type == 'perspective':
+            tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
+
+            # Map previous and next nodes for reduced dual constraints
+            nxt = {}
+            prv = {}
+            for i, j in tour_arcs:
+                nxt[i] = j
+                prv[j] = i
+
+            gamma = sub_model.addVars(tour_arcs, 2, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="gamma")
+            tau = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=0, name="tau")
+
+            sub_model.addConstrs((gamma[i,j,0]**2 + gamma[i,j,1]**2 <= 1.0 for (i,j) in tour_arcs), name="gamma_norm")
+            
+            # ||gamma_{i,next(i)} - gamma_{prev(i),i}|| <= tau_i
+            sub_model.addConstrs(
+                ((gamma[i, nxt[i], 0] - gamma[prv[i], i, 0])**2 + 
+                 (gamma[i, nxt[i], 1] - gamma[prv[i], i, 1])**2 <= tau[i]**2 for i in range(self.n)), 
+                name="tau_bound"
+            )
+            
+            obj_terms = []
+            for i, j in tour_arcs:
+                E_ij = d_sol[i,j] if self.extended else self.estimation[i,j]
+                obj_terms.append(
+                    (self.data.centers[i][0] - self.data.centers[j][0]) * gamma[i,j,0] +
+                    (self.data.centers[i][1] - self.data.centers[j][1]) * gamma[i,j,1] - E_ij
+                )
+            for i in range(self.n):
+                obj_terms.append(-self.data.radii[i] * tau[i])
+            
+            sub_model.setObjective(quicksum(obj_terms), GRB.MAXIMIZE)
+            sub_model.optimize()
+
+            if sub_model.status == GRB.OPTIMAL:
+                # Extract gamma
+                gamma_vals = {(i, j, dim): gamma[i, j, dim].X for i, j in tour_arcs for dim in range(2)}
+                
+                # Reconstruct eta
+                eta_vals = {}
+                for i in range(self.n):
+                    for dim in range(2):
+                        eta_vals[i, dim] = 0.5 * (gamma_vals[i, nxt[i], dim] + gamma_vals[prv[i], i, dim])
+                
+                # Reconstruct alpha and lambda
+                alpha_i_vals = {}
+                alpha_j_vals = {}
+                lambda_i_vals = {}
+                lambda_j_vals = {}
+                
+                for i, j in tour_arcs:
+                    for dim in range(2):
+                        alpha_i_vals[i, j, dim] = eta_vals[i, dim] - gamma_vals[i, j, dim]
+                        alpha_j_vals[i, j, dim] = -eta_vals[j, dim] + gamma_vals[i, j, dim]
+                    
+                    lambda_i_vals[i, j] = float(np.sqrt(alpha_i_vals[i, j, 0]**2 + alpha_i_vals[i, j, 1]**2))
+                    lambda_j_vals[i, j] = float(np.sqrt(alpha_j_vals[i, j, 0]**2 + alpha_j_vals[i, j, 1]**2))
+
+                duals = {
+                    'eta': eta_vals,
+                    'alpha_i': alpha_i_vals,
+                    'alpha_j': alpha_j_vals,
+                    'lambda_i': lambda_i_vals,
+                    'lambda_j': lambda_j_vals
+                }
+
+                return sub_model.objVal, duals
             else:
                 return float('-inf'), {}
 
@@ -351,17 +496,20 @@ class CETSP_L2_Solver:
             else:
                 return float('inf'), {}
 
-    def _add_benders_cut(self, x_sol, sub_obj, duals, cut_type='enumerative', current_estimation=None):
+    def _add_decomposition_cuts(self, x_sol, sub_obj, duals, cut_type='enumerative'):
         """
-        Adds a Benders cut to the master problem.
+        Adds decomposition cuts (Benders and/or integer optimality cuts) to the master problem.
 
         Args:
             x_sol (dict): A dictionary with the values of the x variables.
             sub_obj (float): The objective value of the subproblem.
             duals (dict): The dual variables from the subproblem.
-            cut_type (str): The type of cut to add for the 'seq' model ('dual' or 'enumerative').
-            current_estimation (float): The current distance estimation from the master problem.
+            cut_type (str): The type of cut to add ('dual', 'enumerative', or 'dual+enumerative').
         """
+
+        # Avoid numerical issues
+        sub_obj = max(0.0, sub_obj)
+
         if self.model_type == 'arc':
 
             tour_arcs = []
@@ -376,12 +524,15 @@ class CETSP_L2_Solver:
                 delta += (1 - self.x[i,j])
                 delta_rev += (1 - self.x[j,i])
 
-            self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
-            self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+            self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
+            self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
 
         elif self.model_type == 'seq':
             if 'dual' in cut_type:
-                self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation <= self.theta)
+                if not self.extended:
+                    self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) <= self.theta)
+                else:
+                    self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) - quicksum(self.d[k] for k in range(self.n)) <= self.theta)
             if 'enumerative' in cut_type:
                 tour_seq = []
                 for i in range(self.n):
@@ -400,6 +551,59 @@ class CETSP_L2_Solver:
                 
                 self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
                 self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+
+        elif self.model_type == 'perspective':
+            tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
+            tour_arcs_set = set(tour_arcs)
+
+            if 'dual' in cut_type:
+                # Compute C_ij for all i != j
+                eta_vals = duals.get('eta', {})
+                alpha_i_vals = duals.get('alpha_i', {})
+                alpha_j_vals = duals.get('alpha_j', {})
+                lambda_i_vals = duals.get('lambda_i', {})
+                lambda_j_vals = duals.get('lambda_j', {})
+
+                C = {}
+                for i in range(self.n):
+                    for j in range(self.n):
+                        if i == j:
+                            continue
+                        if (i, j) in tour_arcs_set:
+                            C[i, j] = (self.data.centers[i][0] * alpha_i_vals[i, j, 0]
+                                       + self.data.centers[i][1] * alpha_i_vals[i, j, 1]
+                                       + self.data.radii[i] * lambda_i_vals[i, j]
+                                       + self.data.centers[j][0] * alpha_j_vals[i, j, 0]
+                                       + self.data.centers[j][1] * alpha_j_vals[i, j, 1]
+                                       + self.data.radii[j] * lambda_j_vals[i, j])
+                        else:
+                            eta_i_0 = eta_vals.get((i, 0), 0.0)
+                            eta_i_1 = eta_vals.get((i, 1), 0.0)
+                            eta_j_0 = eta_vals.get((j, 0), 0.0)
+                            eta_j_1 = eta_vals.get((j, 1), 0.0)
+                            norm_eta_i = np.sqrt(eta_i_0**2 + eta_i_1**2)
+                            norm_eta_j = np.sqrt(eta_j_0**2 + eta_j_1**2)
+                            C[i, j] = (self.data.centers[i][0] * eta_i_0
+                                       + self.data.centers[i][1] * eta_i_1
+                                       + norm_eta_i * self.data.radii[i]
+                                       - self.data.centers[j][0] * eta_j_0
+                                       - self.data.centers[j][1] * eta_j_1
+                                       + norm_eta_j * self.data.radii[j])
+
+                if not self.extended:
+                    self.model.cbLazy(quicksum(-self.x[i, j] * (self.estimation[i, j] + C[i, j]) for i in range(self.n) for j in range(self.n) if i != j) <= self.theta)
+                else:
+                    self.model.cbLazy(quicksum(-self.x[i, j] * C[i, j] - self.d[i, j] for i in range(self.n) for j in range(self.n) if i != j) <= self.theta)
+
+            if 'enumerative' in cut_type:
+                delta = LinExpr()
+                delta_rev = LinExpr()
+                for i, j in tour_arcs:
+                    delta += (1 - self.x[i, j])
+                    delta_rev += (1 - self.x[j, i])
+
+                self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
+                self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
 
         elif self.model_type == 'B&S':
             lhs, rhs = self._generate_bs_cut_expr(x_sol, duals)
@@ -471,6 +675,21 @@ class CETSP_L2_Solver:
         self._create_neighborhood_constraints()
         self._create_distance_constraints()
 
+    def _create_perspective_formulation_specific_parts(self):
+        """
+        Creates the constraints and variables specific to the perspective-based formulation (PBF).
+        """
+        self._create_subtour_elimination_constraints()
+        self._create_perspective_continuity_constraints()
+        self._create_neighborhood_constraints()
+        self._create_distance_constraints()
+
+    def _create_perspective_continuity_constraints(self):
+        """
+        Creates position continuity constraints for the PBF model.
+        """
+        self.model.addConstrs((quicksum(self.p_j[i, j, dim] for i in range(self.n) if i != j) == quicksum(self.p_i[j, k, dim] for k in range(self.n) if k != j) for j in range(self.n) for dim in range(2)), name="continuity_perspective")
+
     def _create_subtour_elimination_constraints(self):
         """
         Creates subtour elimination constraints (SCF formulation).
@@ -492,10 +711,15 @@ class CETSP_L2_Solver:
         Computes the Big-M values for the linearization.
         """
         M = np.zeros((self.n, self.n))
+
+        scale = 1.0
+        if self.extended:
+            scale = 1.0 / np.cos(np.pi / (2 ** (self.nu + 1)))
+
         for i in range(self.n):
             for j in range(self.n):
                 dist_centers = np.sqrt((self.data.centers[i][0] - self.data.centers[j][0])**2 + (self.data.centers[i][1] - self.data.centers[j][1])**2)
-                M[i,j] = self.data.radii[i] + dist_centers + self.data.radii[j]
+                M[i,j] = self.data.radii[i] * scale + dist_centers + self.data.radii[j] * scale
         return M
 
     def _compute_distance_estimations(self):
@@ -522,9 +746,11 @@ class CETSP_L2_Solver:
                 self.model.setObjective(self.d_aux.sum(), GRB.MINIMIZE)
             elif self.model_type == 'seq':
                 self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
+            elif self.model_type == 'perspective':
+                self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
         else:
             if not self.extended:
-                if self.model_type == 'arc':
+                if self.model_type in ['arc', 'perspective']:
                     self._compute_distance_estimations()
                     self.model.setObjective(quicksum(self.x[i,j]*self.estimation[i,j] for i in range(self.n) for j in range(self.n)) + self.theta, GRB.MINIMIZE)
                 elif self.model_type == 'seq':
@@ -532,6 +758,6 @@ class CETSP_L2_Solver:
             else:
                 if self.model_type == 'arc':
                     self.model.setObjective(self.d_aux.sum() + self.theta, GRB.MINIMIZE)
-                elif self.model_type == 'seq':
+                elif self.model_type in ['seq', 'perspective']:
                     self.model.setObjective(self.d.sum() + self.theta, GRB.MINIMIZE)
 
