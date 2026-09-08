@@ -1,5 +1,40 @@
 from gurobipy import Model, GRB, LinExpr, quicksum
 import numpy as np
+import os
+import csv
+import json
+
+# Gurobi's optimization status codes (stable across versions), used to render
+# a human-readable status alongside the numeric one in the subproblem telemetry.
+_GRB_STATUS_NAMES = {
+    1: 'LOADED', 2: 'OPTIMAL', 3: 'INFEASIBLE', 4: 'INF_OR_UNBD',
+    5: 'UNBOUNDED', 6: 'CUTOFF', 7: 'ITERATION_LIMIT', 8: 'NODE_LIMIT',
+    9: 'TIME_LIMIT', 10: 'SOLUTION_LIMIT', 11: 'INTERRUPTED', 12: 'NUMERIC',
+    13: 'SUBOPTIMAL', 14: 'INPROGRESS', 15: 'USER_OBJ_LIMIT', 16: 'WORK_LIMIT',
+    17: 'MEM_LIMIT',
+}
+
+# Full column schema for Diagnostics/subproblem_log.csv. Fixed so that every
+# branch (arc/seq/perspective/B&S) writes to the same file with a stable
+# header; columns that don't apply to a given branch/row are left blank.
+_SUBPROBLEM_LOG_FIELDS = [
+    'model_type', 'extended', 'decomposition', 'cut_type', 'n', 'r_mean', 'sigma',
+    'instance', 'callback_index', 'status', 'status_code', 'solCount', 'runtime',
+    'bar_iter_count', 'obj_val',
+    # arc diagnostics
+    'diag_min_d', 'diag_min_d_arc', 'diag_disk_gap', 'diag_max_neighborhood_residual',
+    # seq diagnostics
+    'diag_min_lambda_d', 'diag_min_lambda_c', 'diag_max_norm_rho_d',
+    # perspective diagnostics
+    'diag_max_gamma_norm_excess', 'diag_min_tau', 'diag_min_eta_pairwise_dist',
+    # B&S diagnostics
+    'diag_pi_tau', 'diag_gamma_retrievable',
+    'dump_path',
+]
+
+# Cap on failing-model dumps per solver instance (i.e. per run), so a
+# pathological configuration cannot fill the disk (plan 1f).
+_MAX_FAILURE_DUMPS = 200
 
 class CETSP_L2_Solver:
     """
@@ -26,6 +61,19 @@ class CETSP_L2_Solver:
         self.extended = extended
         self.nu = nu
         self.n = data.n
+        # --- Everything below this point is diagnostic scaffolding
+        # (docs/plans/subproblem-numerics.md Phase 1d-1f): telemetry only,
+        # read only by _flush_subproblem_log() and its helpers below, and
+        # inert unless CETSPModel._log_subproblem() calls _flush_subproblem_log().
+        # Safe to delete as a unit (these attributes, _flush_subproblem_log,
+        # the *_failure_diagnostics/_dump_failed_subproblem/_append_subproblem_log/
+        # _new_subproblem_log_row helpers, and the _pending_log stashing lines
+        # inside _solve_subproblem) without touching _solve_subproblem's
+        # return value or anything cut generation depends on.
+        self.cut_type = None  # set by CETSPModel.build() after construction
+        self._subproblem_call_index = 0
+        self._failure_dump_count = 0
+        self._pending_log = None
 
     def build(self):
         """
@@ -293,6 +341,211 @@ class CETSP_L2_Solver:
 
         self._set_objective()
         
+    def _new_subproblem_log_row(self, sub_model, callback_index):
+        """
+        Builds the base telemetry row (plan 1d) recorded for every subproblem
+        solve, regardless of outcome.
+        """
+        status = sub_model.Status
+        sol_count = sub_model.SolCount
+        return {
+            'model_type': self.model_type,
+            'extended': self.extended,
+            'decomposition': self.decomposition,
+            'cut_type': self.cut_type,
+            'n': self.n,
+            'r_mean': getattr(self.data, 'r_mean', None),
+            'sigma': getattr(self.data, 'sigma', None),
+            'instance': getattr(self.data, 'instance_id', None),
+            'callback_index': callback_index,
+            'status': _GRB_STATUS_NAMES.get(status, f'UNKNOWN_{status}'),
+            'status_code': status,
+            'solCount': sol_count,
+            'runtime': sub_model.Runtime,
+            'bar_iter_count': getattr(sub_model, 'BarIterCount', None),
+            'obj_val': sub_model.ObjVal if sol_count > 0 else None,
+        }
+
+    def _append_subproblem_log(self, row):
+        """
+        Appends one telemetry row to Diagnostics/subproblem_log.csv, creating
+        the file (with header) on first use.
+        """
+        os.makedirs('Diagnostics', exist_ok=True)
+        log_path = os.path.join('Diagnostics', 'subproblem_log.csv')
+        write_header = not os.path.isfile(log_path)
+        with open(log_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=_SUBPROBLEM_LOG_FIELDS, extrasaction='ignore')
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+    def _dump_failed_subproblem(self, sub_model, row):
+        """
+        Writes the failing subproblem (.mps) plus a telemetry sidecar (.json)
+        to Diagnostics/, capped at _MAX_FAILURE_DUMPS per run (plan 1f).
+        Returns the .mps path, or None if the cap was reached or the write failed.
+        """
+        if self._failure_dump_count >= _MAX_FAILURE_DUMPS:
+            return None
+
+        os.makedirs('Diagnostics', exist_ok=True)
+        def _tok(v):
+            return 'NA' if v is None else str(v)
+        base = "failed_{}_{}_{}_{}_{}_{}".format(
+            self.model_type, self.n, _tok(row.get('r_mean')), _tok(row.get('sigma')),
+            _tok(row.get('instance')), _tok(row.get('callback_index'))
+        )
+        mps_path = os.path.join('Diagnostics', base + '.mps')
+        json_path = os.path.join('Diagnostics', base + '.json')
+        try:
+            sub_model.write(mps_path)
+            with open(json_path, 'w') as f:
+                json.dump(row, f, indent=2, default=str)
+        except Exception:
+            return None
+
+        self._failure_dump_count += 1
+        return mps_path
+
+    def _arc_failure_diagnostics(self, sub_model, tour_arcs, p_x, p_y, d):
+        """
+        Diagnostic quantities for a non-OPTIMAL arc subproblem (plan 1e),
+        testing the coincident-visit-point / overlapping-disk hypothesis.
+        """
+        diag = {}
+        if sub_model.SolCount <= 0:
+            return diag
+        try:
+            d_vals = {(i, j): d[i, j].X for i, j in tour_arcs}
+            if d_vals:
+                (mi, mj), min_d = min(d_vals.items(), key=lambda kv: kv[1])
+                ci = np.array(self.data.centers[mi])
+                cj = np.array(self.data.centers[mj])
+                diag['diag_min_d'] = float(min_d)
+                diag['diag_min_d_arc'] = f"{mi}-{mj}"
+                diag['diag_disk_gap'] = float(np.linalg.norm(ci - cj) - (self.data.radii[mi] + self.data.radii[mj]))
+
+            residuals = [
+                float(np.hypot(p_x[i].X - self.data.centers[i][0], p_y[i].X - self.data.centers[i][1]) - self.data.radii[i])
+                for i in range(self.n)
+            ]
+            if residuals:
+                diag['diag_max_neighborhood_residual'] = max(residuals)
+        except Exception:
+            pass
+        return diag
+
+    def _seq_failure_diagnostics(self, sub_model, lambda_d, lambda_c, rho_d):
+        """
+        Diagnostic quantities for a non-OPTIMAL seq subproblem (plan 1e).
+        """
+        diag = {}
+        if sub_model.SolCount <= 0:
+            return diag
+        try:
+            lambda_d_vals = [lambda_d[k].X for k in range(self.n)]
+            lambda_c_vals = [lambda_c[k].X for k in range(self.n)]
+            rho_d_norms = [float(np.hypot(rho_d[k, 0].X, rho_d[k, 1].X)) for k in range(self.n)]
+            if lambda_d_vals:
+                diag['diag_min_lambda_d'] = float(min(lambda_d_vals))
+            if lambda_c_vals:
+                diag['diag_min_lambda_c'] = float(min(lambda_c_vals))
+            if rho_d_norms:
+                diag['diag_max_norm_rho_d'] = float(max(rho_d_norms))
+        except Exception:
+            pass
+        return diag
+
+    def _perspective_failure_diagnostics(self, sub_model, tour_arcs, gamma, tau):
+        """
+        Diagnostic quantities for a non-OPTIMAL perspective subproblem (plan 1e),
+        including the coincident-anchor (eta_i == eta_j) degeneracy check.
+        """
+        diag = {}
+        if sub_model.SolCount <= 0:
+            return diag
+        try:
+            gamma_norms = {(i, j): float(np.hypot(gamma[i, j, 0].X, gamma[i, j, 1].X)) for i, j in tour_arcs}
+            if gamma_norms:
+                diag['diag_max_gamma_norm_excess'] = float(max(v - 1.0 for v in gamma_norms.values()))
+
+            tau_vals = [tau[i].X for i in range(self.n)]
+            if tau_vals:
+                diag['diag_min_tau'] = float(min(tau_vals))
+
+            nxt, prv = {}, {}
+            for i, j in tour_arcs:
+                nxt[i] = j
+                prv[j] = i
+            if len(nxt) == self.n and len(prv) == self.n:
+                eta_vals = {
+                    i: np.array([
+                        0.5 * (gamma[i, nxt[i], 0].X + gamma[prv[i], i, 0].X),
+                        0.5 * (gamma[i, nxt[i], 1].X + gamma[prv[i], i, 1].X),
+                    ])
+                    for i in range(self.n)
+                }
+                dists = [
+                    float(np.linalg.norm(eta_vals[i] - eta_vals[j]))
+                    for i in range(self.n) for j in range(self.n) if i != j
+                ]
+                if dists:
+                    diag['diag_min_eta_pairwise_dist'] = min(dists)
+        except Exception:
+            pass
+        return diag
+
+    def _bs_failure_diagnostics(self, sub_model, sink_constr, c_cap):
+        """
+        Diagnostic quantities for a non-OPTIMAL B&S subproblem (plan 1e).
+        """
+        diag = {}
+        try:
+            diag['diag_pi_tau'] = float(sink_constr.Pi) if sub_model.SolCount > 0 else None
+        except Exception:
+            diag['diag_pi_tau'] = None
+        try:
+            for cap_c in c_cap.values():
+                _ = cap_c.Pi
+            diag['diag_gamma_retrievable'] = True
+        except Exception:
+            diag['diag_gamma_retrievable'] = False
+        return diag
+
+    def _flush_subproblem_log(self):
+        """
+        Writes the telemetry row - and, on a non-OPTIMAL status, the
+        diagnostic payload plus the .mps/.json failing-model dump - for the
+        subproblem solved by the most recent _solve_subproblem() call.
+
+        Diagnostic scaffolding only, invoked exclusively by
+        CETSPModel._log_subproblem(). _solve_subproblem() has already
+        returned its (sub_obj, duals) result by the time this runs, so
+        skipping or deleting this call changes nothing about the solve, the
+        cut generated from it, or the master problem.
+        """
+        pending = self._pending_log
+        self._pending_log = None
+        if pending is None:
+            return
+
+        sub_model = pending['sub_model']
+        row = self._new_subproblem_log_row(sub_model, pending['callback_index'])
+        if sub_model.status != GRB.OPTIMAL:
+            branch = pending['branch']
+            diag_args = pending['diag_args']
+            if branch == 'arc':
+                row.update(self._arc_failure_diagnostics(sub_model, *diag_args))
+            elif branch == 'seq':
+                row.update(self._seq_failure_diagnostics(sub_model, *diag_args))
+            elif branch == 'perspective':
+                row.update(self._perspective_failure_diagnostics(sub_model, *diag_args))
+            elif branch == 'B&S':
+                row.update(self._bs_failure_diagnostics(sub_model, *diag_args))
+            row['dump_path'] = self._dump_failed_subproblem(sub_model, row)
+        self._append_subproblem_log(row)
+
     def _solve_subproblem(self, x_sol, current_estimation, d_sol=None):
         """
         Solves the subproblem for a given integer solution.
@@ -305,6 +558,9 @@ class CETSP_L2_Solver:
         Returns:
             A tuple containing the subproblem objective value and the dual variables.
         """
+        self._subproblem_call_index += 1
+        callback_index = self._subproblem_call_index
+
         sub_model = Model("subproblem")
         sub_model.setParam('OutputFlag', 0)
 
@@ -327,6 +583,12 @@ class CETSP_L2_Solver:
             else:
                 sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
+
+            self._pending_log = {
+                'sub_model': sub_model, 'callback_index': callback_index,
+                'branch': 'arc', 'diag_args': (tour_arcs, p_x, p_y, d),
+            }
+
             if sub_model.status == GRB.OPTIMAL or sub_model.status == GRB.SUBOPTIMAL:
                 return sub_model.objVal, {}
             else:
@@ -357,6 +619,11 @@ class CETSP_L2_Solver:
             else:
                 sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation, GRB.MAXIMIZE)
             sub_model.optimize()
+
+            self._pending_log = {
+                'sub_model': sub_model, 'callback_index': callback_index,
+                'branch': 'seq', 'diag_args': (lambda_d, lambda_c, rho_d),
+            }
 
             if sub_model.status == GRB.OPTIMAL:
                 return sub_model.objVal, sub_model.getAttr('X', mu)
@@ -397,6 +664,11 @@ class CETSP_L2_Solver:
             
             sub_model.setObjective(quicksum(obj_terms), GRB.MAXIMIZE)
             sub_model.optimize()
+
+            self._pending_log = {
+                'sub_model': sub_model, 'callback_index': callback_index,
+                'branch': 'perspective', 'diag_args': (tour_arcs, gamma, tau),
+            }
 
             if sub_model.status == GRB.OPTIMAL:
                 # Extract gamma
@@ -478,6 +750,11 @@ class CETSP_L2_Solver:
 
             sub_model.optimize()
 
+            self._pending_log = {
+                'sub_model': sub_model, 'callback_index': callback_index,
+                'branch': 'B&S', 'diag_args': (sink_constr, c_cap),
+            }
+
             if sub_model.status in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
                 sub_obj = sub_model.objVal
                 pi_tau = sink_constr.Pi
@@ -558,6 +835,9 @@ class CETSP_L2_Solver:
 
             if 'dual' in cut_type:
                 # Compute C_ij for all i != j
+                # Direct indexing (not .get with a default): these keys are always
+                # present on a successful solve, and per invariant 5 a fabricated
+                # zero default silently produces an infeasible dual / invalid cut.
                 eta_vals = duals['eta']
                 alpha_i_vals = duals['alpha_i']
                 alpha_j_vals = duals['alpha_j']

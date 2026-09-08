@@ -46,9 +46,9 @@ class CETSPModel:
         self.status = None
         self.bs_history = []
         self.G = None
-
-
-
+        # Phase 1 telemetry (see docs/plans/subproblem-numerics.md): count of
+        # subproblem solves that failed to reach the required status, and a
+        # guard so the console warning fires at most once per model instance.
         self.subproblem_failures = 0
         self._sub_failure_warned = False
 
@@ -58,6 +58,7 @@ class CETSPModel:
         """
         self.data.eliminate_redundancies()
         self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu)
+        self.solver.cut_type = self.cut_type  # telemetry only; does not affect cut generation
         self.solver.build()
 
         # Initialize NetworkX graph for DFJ separation
@@ -142,13 +143,13 @@ class CETSPModel:
             # Re-solve subproblem to extract active cell flow paths f_sol
             current_estimation = self.model.objVal - self.solver.theta.X
             sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
-
+            self._log_subproblem()
 
             if sub_obj is None:
                 # Without a solved subproblem there is no f_sol to refine cells from.
-
-
-
+                # Break explicitly rather than falling through to duals.get('f_sol', {})
+                # == {} == "no active cells", which would exit via the convergence
+                # path below and disguise a failure as convergence.
                 self._record_subproblem_failure("optimize_bs initial subproblem")
                 break
 
@@ -177,10 +178,10 @@ class CETSPModel:
 
             # Re-solve subproblem using the newly tightened geometry
             refined_sub_obj, refined_duals = self.solver._solve_subproblem(x_sol, current_estimation)
-
+            self._log_subproblem()
 
             if refined_sub_obj is None:
-
+                # Record and skip the dependent comparison/cut; the outer loop continues.
                 self._record_subproblem_failure("optimize_bs refined subproblem")
             elif refined_sub_obj > current_estimation + 1e-5:
                 lhs, rhs = self.solver._generate_bs_cut_expr(x_sol, refined_duals)
@@ -248,7 +249,11 @@ class CETSPModel:
     def _record_subproblem_failure(self, context):
         """
         Permanent. Counts a subproblem failure and prints a one-time (per
-        model instance) console warning.
+        model instance) console warning. Nothing else - in particular, no
+        Diagnostics/ I/O; that's _log_subproblem()'s job. Uses stderr rather
+        than warnings.warn: under -W error a warning raised inside a Gurobi
+        callback becomes an exception, which gurobipy turns into INTERRUPTED,
+        turning a warning into a run-killer.
         """
         self.subproblem_failures += 1
         if not self._sub_failure_warned:
@@ -260,6 +265,19 @@ class CETSPModel:
             )
             self._sub_failure_warned = True
 
+    def _log_subproblem(self):
+        """
+        Scaffolding only (docs/plans/subproblem-numerics.md Phase 1d-1f):
+        writes Diagnostics/subproblem_log.csv, and on a non-OPTIMAL status the
+        diagnostic payload plus a .mps/.json dump, for the subproblem most
+        recently solved by self.solver._solve_subproblem(). Purely an I/O side
+        effect - deleting this method and its three call sites (together with
+        solver.py's _flush_subproblem_log/_pending_log plumbing and the
+        *_failure_diagnostics/_dump_failed_subproblem/_append_subproblem_log/
+        _new_subproblem_log_row helpers) leaves every value returned by
+        _solve_subproblem, and everything built from it, unchanged.
+        """
+        self.solver._flush_subproblem_log()
 
     def _unified_callback(self, model, where):
         """
@@ -288,8 +306,12 @@ class CETSPModel:
 
                 # Solve the subproblem
                 sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation, d_sol)
+                self._log_subproblem()
 
                 if sub_obj is None:
+                    # Invariant 7/3: no sound cut can be built from a failed subproblem.
+                    # Record and skip this callback without adding a cut. Do NOT
+                    # terminate the model - the search continues at other nodes.
                     self._record_subproblem_failure("MIPSOL callback")
                     return
 

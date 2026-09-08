@@ -50,6 +50,12 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
         'sub_failures': []
     }
 
+    # Derived from r_min/r_max for the subproblem telemetry log only
+    # (Diagnostics/subproblem_log.csv); does not affect solving.
+    r_mean_val = (r_min + r_max) / 2.0
+    r_denom = r_min + r_max
+    sigma_val = (r_max - r_min) / r_denom if r_denom > 0 else 0.0
+
     if verbosity == 'high':
         pbar = tqdm.tqdm(total=repetitions, desc="Solving instances")
     else:
@@ -59,6 +65,10 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
         instance_path = os.path.join(folder, instance_file)
         
         cetsp_data = CETSPData.from_file(instance_path)
+        # Telemetry-only context, consumed by CETSP_L2_Solver's subproblem log.
+        cetsp_data.r_mean = r_mean_val
+        cetsp_data.sigma = sigma_val
+        cetsp_data.instance_id = instance_file
 
         model = CETSPModel(
             cetsp_data,
@@ -82,6 +92,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             elif model.model.Status == GRB.TIME_LIMIT:
                 results['status'].append("Time_Limit")
             else:
+                # Runs that trip the subproblem-failure path are exactly the ones
+                # likely to end in a non-standard status; don't drop them silently.
                 results['status'].append(f"Other_{model.model.Status}")
             results['ub'].append(summary.get('upper_bound', float('inf')))
             results['lb'].append(summary.get('lower_bound', 0.0))
