@@ -46,7 +46,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
         'gap': [],
         'runtime': [],
         'cuts': [],
-        'dfj_cuts': []
+        'dfj_cuts': [],
+        'sub_failures': []
     }
 
     if verbosity == 'high':
@@ -80,6 +81,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
                 results['status'].append("Suboptimal")
             elif model.model.Status == GRB.TIME_LIMIT:
                 results['status'].append("Time_Limit")
+            else:
+                results['status'].append(f"Other_{model.model.Status}")
             results['ub'].append(summary.get('upper_bound', float('inf')))
             results['lb'].append(summary.get('lower_bound', 0.0))
             results['root_bound'].append(summary.get('root_bound', float('inf')))
@@ -88,6 +91,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             results['runtime'].append(summary.get('runtime', 0))
             results['cuts'].append(summary.get('cuts_added', 0))
             results['dfj_cuts'].append(summary.get('dfj_cuts', 0))
+            results['sub_failures'].append(summary.get('subproblem_failures', 0))
         else:
             results['status'].append("Failed")
             results['ub'].append(float('inf'))
@@ -98,6 +102,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             results['runtime'].append(time_limit)
             results['cuts'].append(0)
             results['dfj_cuts'].append(0)
+            results['sub_failures'].append(getattr(model, 'subproblem_failures', 0))
 
         if pbar:
             pbar.update(1)
@@ -234,6 +239,7 @@ if __name__ == "__main__":
                             "Time": instance_results['runtime'][i],
                             "Cuts": instance_results['cuts'][i],
                             "DFJ_Cuts": instance_results['dfj_cuts'][i],
+                            "Sub_Failures": instance_results['sub_failures'][i],
                         }
                         final_results.append(row_data)
                     

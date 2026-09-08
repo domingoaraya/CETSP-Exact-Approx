@@ -1,3 +1,4 @@
+import sys
 import time
 from gurobipy import Model, GRB, quicksum
 import networkx as nx
@@ -45,6 +46,11 @@ class CETSPModel:
         self.status = None
         self.bs_history = []
         self.G = None
+
+
+
+        self.subproblem_failures = 0
+        self._sub_failure_warned = False
 
     def build(self):
         """
@@ -137,7 +143,16 @@ class CETSPModel:
             current_estimation = self.model.objVal - self.solver.theta.X
             sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
 
-            f_sol = duals.get('f_sol', {})
+
+            if sub_obj is None:
+                # Without a solved subproblem there is no f_sol to refine cells from.
+
+
+
+                self._record_subproblem_failure("optimize_bs initial subproblem")
+                break
+
+            f_sol = duals['f_sol']
             active_cell_edges = [edge for edge, flow in f_sol.items() if flow > 0.01]
 
             active_cells = set()
@@ -162,7 +177,12 @@ class CETSPModel:
 
             # Re-solve subproblem using the newly tightened geometry
             refined_sub_obj, refined_duals = self.solver._solve_subproblem(x_sol, current_estimation)
-            if refined_sub_obj > current_estimation + 1e-5:
+
+
+            if refined_sub_obj is None:
+
+                self._record_subproblem_failure("optimize_bs refined subproblem")
+            elif refined_sub_obj > current_estimation + 1e-5:
                 lhs, rhs = self.solver._generate_bs_cut_expr(x_sol, refined_duals)
                 if lhs is not None:
                     self.model.addConstr(lhs >= rhs, name=f"refined_cut_iter_{iteration}")
@@ -225,6 +245,22 @@ class CETSPModel:
 
         return subtours
 
+    def _record_subproblem_failure(self, context):
+        """
+        Permanent. Counts a subproblem failure and prints a one-time (per
+        model instance) console warning.
+        """
+        self.subproblem_failures += 1
+        if not self._sub_failure_warned:
+            print(
+                f"[CETSP] subproblem failed to solve to the required status "
+                f"({context}, model_type={self.model_type}). "
+                f"Further occurrences this run are counted but not printed.",
+                file=sys.stderr,
+            )
+            self._sub_failure_warned = True
+
+
     def _unified_callback(self, model, where):
         """
         Gurobi callback for lazy constraints (MIPSOL) and DFJ user cuts (MIPNODE).
@@ -252,6 +288,10 @@ class CETSPModel:
 
                 # Solve the subproblem
                 sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation, d_sol)
+
+                if sub_obj is None:
+                    self._record_subproblem_failure("MIPSOL callback")
+                    return
 
                 if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
                     self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
@@ -498,6 +538,7 @@ class CETSPModel:
                 "status": self.status,
                 "cuts_added": self.cuts,
                 "dfj_cuts": self.dfj_cuts,
+                "subproblem_failures": self.subproblem_failures,
                 "arcs": self.arcs,
                 "points": self.points
             }

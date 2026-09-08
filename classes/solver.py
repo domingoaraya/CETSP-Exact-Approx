@@ -330,7 +330,7 @@ class CETSP_L2_Solver:
             if sub_model.status == GRB.OPTIMAL or sub_model.status == GRB.SUBOPTIMAL:
                 return sub_model.objVal, {}
             else:
-                return float('inf'), {}
+                return None, None
 
 
         elif self.model_type == 'seq':
@@ -361,7 +361,7 @@ class CETSP_L2_Solver:
             if sub_model.status == GRB.OPTIMAL:
                 return sub_model.objVal, sub_model.getAttr('X', mu)
             else:
-                return float('-inf'), {}
+                return None, None
 
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
@@ -432,7 +432,7 @@ class CETSP_L2_Solver:
 
                 return sub_model.objVal, duals
             else:
-                return float('-inf'), {}
+                return None, None
 
         elif self.model_type == 'B&S':
             sub_model = Model("bs_subproblem")
@@ -494,7 +494,7 @@ class CETSP_L2_Solver:
                 }
                 return sub_obj, duals
             else:
-                return float('inf'), {}
+                return None, None
 
     def _add_decomposition_cuts(self, x_sol, sub_obj, duals, cut_type='enumerative'):
         """
@@ -558,11 +558,11 @@ class CETSP_L2_Solver:
 
             if 'dual' in cut_type:
                 # Compute C_ij for all i != j
-                eta_vals = duals.get('eta', {})
-                alpha_i_vals = duals.get('alpha_i', {})
-                alpha_j_vals = duals.get('alpha_j', {})
-                lambda_i_vals = duals.get('lambda_i', {})
-                lambda_j_vals = duals.get('lambda_j', {})
+                eta_vals = duals['eta']
+                alpha_i_vals = duals['alpha_i']
+                alpha_j_vals = duals['alpha_j']
+                lambda_i_vals = duals['lambda_i']
+                lambda_j_vals = duals['lambda_j']
 
                 C = {}
                 for i in range(self.n):
@@ -577,10 +577,10 @@ class CETSP_L2_Solver:
                                        + self.data.centers[j][1] * alpha_j_vals[i, j, 1]
                                        + self.data.radii[j] * lambda_j_vals[i, j])
                         else:
-                            eta_i_0 = eta_vals.get((i, 0), 0.0)
-                            eta_i_1 = eta_vals.get((i, 1), 0.0)
-                            eta_j_0 = eta_vals.get((j, 0), 0.0)
-                            eta_j_1 = eta_vals.get((j, 1), 0.0)
+                            eta_i_0 = eta_vals[i, 0]
+                            eta_i_1 = eta_vals[i, 1]
+                            eta_j_0 = eta_vals[j, 0]
+                            eta_j_1 = eta_vals[j, 1]
                             norm_eta_i = np.sqrt(eta_i_0**2 + eta_i_1**2)
                             norm_eta_j = np.sqrt(eta_j_0**2 + eta_j_1**2)
                             C[i, j] = (self.data.centers[i][0] * eta_i_0
