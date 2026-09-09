@@ -1,5 +1,11 @@
 from gurobipy import Model, GRB, LinExpr, quicksum
 import numpy as np
+import sys
+
+# Count of subproblem solves where Gurobi ObjVal disagreed with the model own
+# stored objective (see _subproblem_objective). Process-wide: printed once,
+# counted always.
+_objval_mismatch_seen = 0
 
 # Numerical hardening for the arc SOCP. NumericFocus=2 measured identical to 3
 # across the whole captured failure corpus, so take the cheaper one. Applied
@@ -361,6 +367,53 @@ class CETSP_L2_Solver:
 
         self._set_objective()
         
+    def _subproblem_objective(self, sub_model):
+        """
+        Read the subproblem objective WITHOUT trusting Model.ObjVal.
+
+        On this model class Gurobi 12.0.2 has been observed to return ObjVal
+        with the WRONG SIGN on a maximization QCP while the returned point is
+        itself correct and optimal: ObjVal = -f(z*), where the model own
+        getObjective().getValue(), its stored v.Obj coefficients, and the
+        formula evaluated by hand all agree on +f(z*). ModelSense and ObjCon
+        are correct; only the attribute is wrong, and the negation is exact to
+        9 significant digits, including the objective constant. It reproduces
+        at default barrier tolerance and disappears under BarQCPConvTol=1e-9,
+        so it is a reporting path, not an arithmetic error.
+
+        Consequence if trusted: on the perspective dual it turned Q(x_hat) into
+        -Q(x_hat). Since theta has lb 0, the callback test
+        theta < sub_obj - 1e-6 then reads 0 < -Q and is FALSE, so no cut of any
+        kind was ever added and the master accepted x_hat with theta = 0,
+        deflating the reported UB by exactly Q(x_hat) - up to 6.1 absolute, 36%
+        relative. That is why the dual, enumerative and dual+enumerative cut
+        types all failed identically: the failure is upstream of cut selection.
+
+        getObjective().getValue() re-evaluates the stored objective at the
+        returned solution, so it cannot disagree with the model. ObjVal is
+        still read, purely to detect and report the discrepancy.
+        """
+        val = sub_model.getObjective().getValue()
+        try:
+            reported = sub_model.ObjVal
+            if abs(val - reported) > 1e-6 * max(1.0, abs(val)):
+                global _objval_mismatch_seen
+                _objval_mismatch_seen += 1
+                if _objval_mismatch_seen == 1:
+                    # Once per PROCESS, not per model: a grid run builds a fresh
+                    # solver per instance, so a per-instance flag would print one
+                    # line per instance. The value in force is already correct,
+                    # so this is observability rather than a soundness warning -
+                    # but it must not be silent, or a change in solver behaviour
+                    # would go unnoticed.
+                    print('[CETSP] Gurobi ObjVal disagrees with the stored objective on the '
+                          '%s subproblem (ObjVal=%.9g, recomputed=%.9g); using the recomputed '
+                          'value. Counted in _objval_mismatch_seen; not printed again.'
+                          % (self.model_type, reported, val), file=sys.stderr)
+        except Exception:
+            pass
+        return val
+
     def _solve_subproblem(self, x_sol, current_estimation, d_sol=None):
         """
         Solves the subproblem for a given integer solution.
@@ -398,7 +451,7 @@ class CETSP_L2_Solver:
                 sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
             if sub_model.status == GRB.OPTIMAL or sub_model.status == GRB.SUBOPTIMAL:
-                return sub_model.objVal, {}
+                return self._subproblem_objective(sub_model), {}
             else:
                 return None, None
 
@@ -429,7 +482,7 @@ class CETSP_L2_Solver:
             sub_model.optimize()
 
             if sub_model.status == GRB.OPTIMAL:
-                return sub_model.objVal, sub_model.getAttr('X', mu)
+                return self._subproblem_objective(sub_model), sub_model.getAttr('X', mu)
             else:
                 return None, None
 
@@ -500,7 +553,7 @@ class CETSP_L2_Solver:
                     'lambda_j': lambda_j_vals
                 }
 
-                return sub_model.objVal, duals
+                return self._subproblem_objective(sub_model), duals
             else:
                 return None, None
 
@@ -549,7 +602,7 @@ class CETSP_L2_Solver:
             sub_model.optimize()
 
             if sub_model.status in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-                sub_obj = sub_model.objVal
+                sub_obj = self._subproblem_objective(sub_model)
                 pi_tau = sink_constr.Pi
                 gamma = {}
                 f_sol = {}

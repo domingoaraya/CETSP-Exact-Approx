@@ -293,6 +293,21 @@ class CETSPModel:
                     self._record_subproblem_failure("MIPSOL callback")
                     return
 
+                # Q(x_hat) >= 0 is PROVABLE for the non-extended master: it prices
+                # each arc at m_ij, a valid lower bound on that arc distance, so
+                # every (d_ij - m_ij) term is non-negative. A negative value can
+                # only mean the subproblem objective was read wrongly, and that is
+                # exactly the case that silently defeats the violation test below
+                # (theta has lb 0, so theta < sub_obj is false for any negative
+                # sub_obj and no cut is ever added). Fail loudly instead of
+                # deflating the bound. The extended master subtracts
+                # current_estimation, where a negative value is legitimate, so the
+                # check is scoped to non-extended.
+                if not self.extended and sub_obj < -1e-6:
+                    self._record_subproblem_failure(
+                        f"negative Q(x_hat)={sub_obj:.6g}, which is provably impossible")
+                    return
+
                 if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
                     self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
                     if self.model_type == 'B&S':
