@@ -3,6 +3,7 @@ import numpy as np
 import os
 import csv
 import json
+import sys
 
 # Gurobi's optimization status codes (stable across versions), used to render
 # a human-readable status alongside the numeric one in the subproblem telemetry.
@@ -30,11 +31,46 @@ _SUBPROBLEM_LOG_FIELDS = [
     # B&S diagnostics
     'diag_pi_tau', 'diag_gamma_retrievable',
     'dump_path',
+    # --- Phase 3 Step 0 control instrumentation (TEMPORARY) ---
+    # Logged for EVERY arc solve regardless of status, not just failures. The
+    # Phase 2 residual statistic is only diagnostic if OPTIMAL solves *don't*
+    # show it, and plan 1e only ever fired on non-OPTIMAL solves, so there was
+    # no baseline to compare against. Remove with the rest of the telemetry.
+    'ctrl_resid_dist', 'ctrl_resid_quad', 'ctrl_resid_dcon',
+    'ctrl_maxvio', 'ctrl_feastol',
 ]
 
+# Artifact hygiene: the Step 0 control run must not append to, or dump into,
+# the Phase 2 corpus. Both are overridable from the environment so a control
+# run can be pointed at its own log with dumping switched off, leaving
+# Diagnostics/subproblem_log.csv and the 54-file corpus untouched.
+_LOG_PATH = os.environ.get(
+    'CETSP_SUBPROBLEM_LOG', os.path.join('Diagnostics', 'subproblem_log.csv'))
+
 # Cap on failing-model dumps per solver instance (i.e. per run), so a
-# pathological configuration cannot fill the disk (plan 1f).
+# pathological configuration cannot fill the disk (plan 1f). Secondary guard:
+# in practice the stratified per-cell budget below binds first.
+# Numerical hardening for the arc SOCP (Phase 3). NumericFocus=2 measured
+# identical to 3 across the whole 54-model failure corpus, so take the cheaper
+# one. Applied only where an arc neighborhood cone actually exists.
+_ARC_NUMERIC_FOCUS = 2
+
+# Count of solves where Gurobi ObjVal disagreed with the stored objective
+# (see _subproblem_objective). Process-wide; printed once, counted always.
+_objval_mismatch_seen = 0
+
 _MAX_FAILURE_DUMPS = 200
+
+# Stratified dump budget: at most _DUMPS_PER_CELL captures per
+# (model_type, extended, cut_type, n, r_mean, sigma) grid cell. Without this the
+# corpus is consumed by whichever high-failure configuration runs first - a
+# single 2-instance arc cell at n=20, r_mean=1 produced 143 dumps on its own -
+# leaving the low-r_mean cells and the seq/perspective branches unrepresented in
+# Phase 3's sweep. Failure *rates* are unaffected either way: those are computed
+# from subproblem_log.csv, which records every solve regardless of dumping.
+# Process-global, which is exact as long as one process never splits a cell.
+_DUMPS_PER_CELL = int(os.environ.get('CETSP_DUMPS_PER_CELL', '3'))
+_dumps_by_cell = {}
 
 class CETSP_L2_Solver:
     """
@@ -80,6 +116,8 @@ class CETSP_L2_Solver:
         Builds the CETSP model by creating variables, constraints, and the objective function.
         """
         self.model.setParam('OutputFlag', 0)
+        if self._arc_cones_present():
+            self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
 
         if self.model_type == "B&S":
             self._build_bs_master_model()
@@ -128,6 +166,8 @@ class CETSP_L2_Solver:
                 # CONTINUOUS variables for the coordinates of the points in each region
                 self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
                 self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+                if self.model_type == 'arc':
+                    self._apply_arc_point_bounds(self.p_x, self.p_y)
 
             if self.model_type == "arc":
                 # CONTINUOUS variables for the distance between points
@@ -143,6 +183,42 @@ class CETSP_L2_Solver:
         if self.decomposition:
             self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb = 0)
 
+
+    def _apply_arc_point_bounds(self, p_x, p_y):
+        """
+        Bound each arc point variable to the box c_i +/- r_i.
+
+        Implied by the neighborhood ball ||p_i - c_i|| <= r_i, so no feasible
+        point is excluded: exact, not a restriction. Two reasons it matters:
+
+        1. The depot has r_0 = 0 (invariant 8), so its ball has an EMPTY
+           interior. No strictly feasible point exists for that constraint, so
+           Slater fails and the barrier has no central path for it. The box
+           collapses to a single point and pins p_0 = c_0, removing the
+           degeneracy. Measured on the Phase 2 failure corpus, this alone moves
+           SUBOPTIMAL from 54/54 to 0/54 and halves barrier iterations.
+        2. These variables are otherwise declared free, so barrier iterates are
+           unconstrained even though the feasible region is already compact.
+
+        Valid ONLY for model_type == arc, where the variable index is the target
+        index. In the seq formulation p_x[k] is the point at tour POSITION k and
+        may belong to any target, so a per-target box would cut off feasible
+        solutions. A global box over all targets would be needed there instead.
+        """
+        for i in range(self.n):
+            cx, cy = self.data.centers[i]
+            r = self.data.radii[i]
+            p_x[i].LB, p_x[i].UB = cx - r, cx + r
+            p_y[i].LB, p_y[i].UB = cy - r, cy + r
+
+    def _arc_cones_present(self):
+        """
+        True when this model carries real (non-approximated) arc neighborhood
+        cones: the full MISOCP, and the model built by compute_upper_bound.
+        The non-extended decomposition master has no p variables at all, and
+        the extended variants replace the cone with a polyhedral relaxation.
+        """
+        return self.model_type == 'arc' and not self.extended and not self.decomposition
 
     def _create_tour_constraints(self):
         """
@@ -163,15 +239,35 @@ class CETSP_L2_Solver:
         """
         if not self.extended:
             if self.model_type == 'arc':
-                self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n)), name="neighborhood")
+                # radii[i] == 0 targets are already pinned to their center by
+                # _apply_arc_point_bounds, so the cone would be a degenerate
+                # (empty-interior) constraint that only hurts the barrier.
+                self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             elif self.model_type == 'seq':
+                # x[0,0] == 1 is fixed (fix_start), so tour POSITION 0 always holds
+                # target 0. When that target has r = 0 (the depot, invariant 8) the
+                # cone at position 0 reads ||p_0 - c_0|| <= 0: an empty-interior
+                # constraint, known at build time. Pin the point and skip the cone.
+                # Leaving it in understates the reported tour by up to 3.6e-2.
+                degenerate_start = self.data.radii[0] == 0.0
+                positions = range(1, self.n) if degenerate_start else range(self.n)
+                if degenerate_start:
+                    self.p_x[0].LB = self.p_x[0].UB = self.data.centers[0][0]
+                    self.p_y[0].LB = self.p_y[0].UB = self.data.centers[0][1]
                 self.model.addConstrs(((self.p_x[k] - quicksum(self.x[i, k] * self.data.centers[i][0] for i in range(self.n)))**2 +
                                       (self.p_y[k] - quicksum(self.x[i, k] * self.data.centers[i][1] for i in range(self.n)))**2 <=
                                       quicksum(self.x[i, k] * self.data.radii[i] for i in range(self.n))**2
-                                      for k in range(self.n)), name="neighborhood")
+                                      for k in positions), name="neighborhood")
             elif self.model_type == 'perspective':
-                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_i_perspective")
-                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_j_perspective")
+                # A zero-radius target (the depot, invariant 8) turns its cone into
+                # ||p - x c|| <= 0, an empty-interior constraint that has no strictly
+                # feasible point for the barrier. State it as the linear equality it
+                # actually is. Leaving it as a cone understates the reported tour by
+                # up to 1.6e-2 and can end the solve in GRB.NUMERIC.
+                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[i] > 0.0), name="neighborhood_p_i_perspective")
+                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[j] > 0.0), name="neighborhood_p_j_perspective")
+                self.model.addConstrs((self.p_i[i, j, dim] == self.x[i, j] * self.data.centers[i][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[i] == 0.0), name="neighborhood_p_i_degenerate")
+                self.model.addConstrs((self.p_j[i, j, dim] == self.x[i, j] * self.data.centers[j][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[j] == 0.0), name="neighborhood_p_j_degenerate")
         else:
             self._create_approximated_socp_constraints('neighborhood')
 
@@ -371,8 +467,30 @@ class CETSP_L2_Solver:
         Appends one telemetry row to Diagnostics/subproblem_log.csv, creating
         the file (with header) on first use.
         """
-        os.makedirs('Diagnostics', exist_ok=True)
-        log_path = os.path.join('Diagnostics', 'subproblem_log.csv')
+        log_path = _LOG_PATH
+        parent = os.path.dirname(log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        # Schema guard. The Step 0 control columns widened the header, so
+        # appending to a log written before that change would silently
+        # misalign every new row against the old header. Divert to a sibling
+        # file instead of corrupting a completed log - and never raise, since
+        # this runs on the callback path where an exception becomes
+        # INTERRUPTED and kills the run.
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, 'r', newline='') as fh:
+                    existing = next(csv.reader(fh), None)
+            except Exception:
+                existing = None
+            if existing is not None and existing != _SUBPROBLEM_LOG_FIELDS:
+                stem, ext = os.path.splitext(log_path)
+                log_path = stem + '_v2' + (ext or '.csv')
+                if not getattr(self, '_schema_diverted', False):
+                    print('[CETSP] telemetry schema changed; writing to '
+                          + log_path + ' to avoid corrupting ' + _LOG_PATH,
+                          file=sys.stderr)
+                    self._schema_diverted = True
         write_header = not os.path.isfile(log_path)
         with open(log_path, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=_SUBPROBLEM_LOG_FIELDS, extrasaction='ignore')
@@ -389,11 +507,22 @@ class CETSP_L2_Solver:
         if self._failure_dump_count >= _MAX_FAILURE_DUMPS:
             return None
 
+        cell = (self.model_type, bool(self.extended), self.cut_type, self.n,
+                row.get('r_mean'), row.get('sigma'))
+        if _dumps_by_cell.get(cell, 0) >= _DUMPS_PER_CELL:
+            return None
+
         os.makedirs('Diagnostics', exist_ok=True)
         def _tok(v):
             return 'NA' if v is None else str(v)
-        base = "failed_{}_{}_{}_{}_{}_{}".format(
-            self.model_type, self.n, _tok(row.get('r_mean')), _tok(row.get('sigma')),
+        # extended and cut_type are part of the name, not just the sidecar: the
+        # Phase 2 grid runs extended=False and extended=True over the same
+        # (model_type, n, r_mean, sigma, instance) points, so without them two
+        # failures sharing a callback_index silently overwrite each other and
+        # the corpus loses one of them.
+        base = "failed_{}_ext{}_{}_{}_{}_{}_{}_{}".format(
+            self.model_type, int(bool(self.extended)), _tok(self.cut_type), self.n,
+            _tok(row.get('r_mean')), _tok(row.get('sigma')),
             _tok(row.get('instance')), _tok(row.get('callback_index'))
         )
         mps_path = os.path.join('Diagnostics', base + '.mps')
@@ -406,6 +535,7 @@ class CETSP_L2_Solver:
             return None
 
         self._failure_dump_count += 1
+        _dumps_by_cell[cell] = _dumps_by_cell.get(cell, 0) + 1
         return mps_path
 
     def _arc_failure_diagnostics(self, sub_model, tour_arcs, p_x, p_y, d):
@@ -513,6 +643,52 @@ class CETSP_L2_Solver:
             diag['diag_gamma_retrievable'] = False
         return diag
 
+    def _arc_control_residuals(self, sub_model, tour_arcs, p_x, p_y, d):
+        """
+        Phase 3 Step 0 control instrumentation (TEMPORARY).
+
+        Computed for every arc solve regardless of status, so the OPTIMAL
+        population provides the baseline that makes the residual statistic
+        interpretable. Reports the neighbourhood violation in both distance
+        units (||p_i - c_i|| - r_i) and quadratic units
+        (||p_i - c_i||^2 - r_i^2) - the latter is the form the constraint is
+        actually written in, and therefore what FeasibilityTol applies to.
+        """
+        ctrl = {}
+        try:
+            ctrl['ctrl_feastol'] = float(sub_model.Params.FeasibilityTol)
+        except Exception:
+            pass
+        try:
+            ctrl['ctrl_maxvio'] = float(sub_model.MaxVio)
+        except Exception:
+            pass
+        if sub_model.SolCount <= 0:
+            return ctrl
+        try:
+            resid_dist, resid_quad = [], []
+            for i in range(self.n):
+                cx, cy = self.data.centers[i]
+                r = self.data.radii[i]
+                dx = p_x[i].X - cx
+                dy = p_y[i].X - cy
+                sq = dx * dx + dy * dy
+                resid_dist.append(float(np.sqrt(sq) - r))
+                resid_quad.append(float(sq - r * r))
+            if resid_dist:
+                ctrl['ctrl_resid_dist'] = max(resid_dist)
+                ctrl['ctrl_resid_quad'] = max(resid_quad)
+
+            dcon = []
+            for i, j in tour_arcs:
+                gap = float(np.hypot(p_x[i].X - p_x[j].X, p_y[i].X - p_y[j].X))
+                dcon.append(float(d[i, j].X) - gap)
+            if dcon:
+                ctrl['ctrl_resid_dcon'] = min(dcon)
+        except Exception:
+            pass
+        return ctrl
+
     def _flush_subproblem_log(self):
         """
         Writes the telemetry row - and, on a non-OPTIMAL status, the
@@ -532,6 +708,9 @@ class CETSP_L2_Solver:
 
         sub_model = pending['sub_model']
         row = self._new_subproblem_log_row(sub_model, pending['callback_index'])
+        # Step 0 control: every arc solve, OPTIMAL included (TEMPORARY).
+        if pending['branch'] == 'arc':
+            row.update(self._arc_control_residuals(sub_model, *pending['diag_args']))
         if sub_model.status != GRB.OPTIMAL:
             branch = pending['branch']
             diag_args = pending['diag_args']
@@ -545,6 +724,48 @@ class CETSP_L2_Solver:
                 row.update(self._bs_failure_diagnostics(sub_model, *diag_args))
             row['dump_path'] = self._dump_failed_subproblem(sub_model, row)
         self._append_subproblem_log(row)
+
+    def _subproblem_objective(self, sub_model):
+        """
+        Read the subproblem objective WITHOUT trusting Model.ObjVal.
+
+        On this model class Gurobi 12.0.2 has been observed to return ObjVal
+        with the WRONG SIGN on a maximization QCP while the returned point is
+        itself correct and optimal: ObjVal = -f(z*) where the model own
+        getObjective().getValue(), its stored v.Obj coefficients, and the
+        formula evaluated by hand all agree on +f(z*). ModelSense and ObjCon
+        are correct; only the attribute is wrong. It reproduces at default
+        barrier tolerance and disappears under BarQCPConvTol=1e-9.
+
+        Consequence if trusted: for the perspective dual it turned Q(x_hat)
+        into -Q(x_hat). Since theta has lb 0, the callback test
+        theta < sub_obj - 1e-6 then reads 0 < -Q and is FALSE, so no cut was
+        ever added and the master accepted x_hat with theta = 0 - deflating
+        the reported UB by exactly Q(x_hat) (up to 6.1 absolute, 36%).
+
+        getObjective().getValue() re-evaluates the stored objective at the
+        returned solution, so it cannot disagree with the model. ObjVal is
+        still cross-checked and a mismatch warned about once per run.
+        """
+        val = sub_model.getObjective().getValue()
+        try:
+            reported = sub_model.ObjVal
+            if abs(val - reported) > 1e-6 * max(1.0, abs(val)):
+                global _objval_mismatch_seen
+                _objval_mismatch_seen += 1
+                if _objval_mismatch_seen == 1:
+                    # Once per PROCESS, not per model: a grid run builds a fresh
+                    # solver per instance, so a per-instance flag prints one line
+                    # per instance. The value in force is already correct, so this
+                    # is observability, not a soundness warning - but it must not
+                    # be silent, or a change in solver behaviour would go unnoticed.
+                    print('[CETSP] Gurobi ObjVal disagrees with the stored objective on the '
+                          '%s subproblem (ObjVal=%.9g, recomputed=%.9g); using the recomputed '
+                          'value. Counted in _objval_mismatch_seen; not printed again.'
+                          % (self.model_type, reported, val), file=sys.stderr)
+        except Exception:
+            pass
+        return val
 
     def _solve_subproblem(self, x_sol, current_estimation, d_sol=None):
         """
@@ -565,8 +786,10 @@ class CETSP_L2_Solver:
         sub_model.setParam('OutputFlag', 0)
 
         if self.model_type == 'arc':
+            sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
             p_x = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
             p_y = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+            self._apply_arc_point_bounds(p_x, p_y)
             tour_arcs = []
             for i in range(self.n):
                 for j in range(self.n):
@@ -575,7 +798,7 @@ class CETSP_L2_Solver:
             
             d = sub_model.addVars(tour_arcs, vtype=GRB.CONTINUOUS, name="d")
             
-            sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n)), name="neighborhood")
+            sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             sub_model.addConstrs((d[i,j]**2 >= (p_x[i] - p_x[j])**2 + (p_y[i] - p_y[j])**2 for i,j in tour_arcs), name="distance")
 
             if not self.extended:
@@ -590,7 +813,7 @@ class CETSP_L2_Solver:
             }
 
             if sub_model.status == GRB.OPTIMAL or sub_model.status == GRB.SUBOPTIMAL:
-                return sub_model.objVal, {}
+                return self._subproblem_objective(sub_model), {}
             else:
                 return None, None
 
@@ -626,7 +849,7 @@ class CETSP_L2_Solver:
             }
 
             if sub_model.status == GRB.OPTIMAL:
-                return sub_model.objVal, sub_model.getAttr('X', mu)
+                return self._subproblem_objective(sub_model), sub_model.getAttr('X', mu)
             else:
                 return None, None
 
@@ -702,7 +925,7 @@ class CETSP_L2_Solver:
                     'lambda_j': lambda_j_vals
                 }
 
-                return sub_model.objVal, duals
+                return self._subproblem_objective(sub_model), duals
             else:
                 return None, None
 
@@ -756,7 +979,7 @@ class CETSP_L2_Solver:
             }
 
             if sub_model.status in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
-                sub_obj = sub_model.objVal
+                sub_obj = self._subproblem_objective(sub_model)
                 pi_tau = sink_constr.Pi
                 gamma = {}
                 f_sol = {}
