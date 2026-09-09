@@ -1,6 +1,13 @@
 from gurobipy import Model, GRB, LinExpr, quicksum
 import numpy as np
 
+# Numerical hardening for the arc SOCP. NumericFocus=2 measured identical to 3
+# across the whole captured failure corpus, so take the cheaper one. Applied
+# ONLY where an arc neighborhood cone actually exists: it resolves arc and
+# actively harms the perspective dual (5/18 outright solve failures there).
+_ARC_NUMERIC_FOCUS = 2
+
+
 class CETSP_L2_Solver:
     """
     A solver for the Close Enough Traveling Salesperson Problem (CETSP) with L2 norm.
@@ -32,6 +39,8 @@ class CETSP_L2_Solver:
         Builds the CETSP model by creating variables, constraints, and the objective function.
         """
         self.model.setParam('OutputFlag', 0)
+        if self._arc_cones_present():
+            self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
 
         if self.model_type == "B&S":
             self._build_bs_master_model()
@@ -80,6 +89,8 @@ class CETSP_L2_Solver:
                 # CONTINUOUS variables for the coordinates of the points in each region
                 self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
                 self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+                if self.model_type == 'arc':
+                    self._apply_arc_point_bounds(self.p_x, self.p_y)
 
             if self.model_type == "arc":
                 # CONTINUOUS variables for the distance between points
@@ -95,6 +106,42 @@ class CETSP_L2_Solver:
         if self.decomposition:
             self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb = 0)
 
+
+    def _apply_arc_point_bounds(self, p_x, p_y):
+        """
+        Bound each arc point variable to the box c_i +/- r_i.
+
+        Implied by the neighborhood ball ||p_i - c_i|| <= r_i, so no feasible
+        point is excluded: exact, not a restriction. Two reasons it matters:
+
+        1. The depot has r_0 = 0, so its ball has an EMPTY interior. No strictly
+           feasible point exists for that constraint, Slater fails, and the
+           barrier has no central path for it. The box collapses to a single
+           point and pins p_0 = c_0, removing the degeneracy. On the captured
+           failure corpus this alone moved SUBOPTIMAL from 54/54 to 0/54 and
+           halved barrier iterations.
+        2. These variables are otherwise declared free, so barrier iterates are
+           unconstrained even though the feasible region is already compact.
+
+        Valid ONLY for model_type == arc, where the variable index is the target
+        index. In the seq formulation p_x[k] is the point at tour POSITION k and
+        may belong to any target, so a per-target box would cut off feasible
+        solutions.
+        """
+        for i in range(self.n):
+            cx, cy = self.data.centers[i]
+            r = self.data.radii[i]
+            p_x[i].LB, p_x[i].UB = cx - r, cx + r
+            p_y[i].LB, p_y[i].UB = cy - r, cy + r
+
+    def _arc_cones_present(self):
+        """
+        True when this model carries real (non-approximated) arc neighborhood
+        cones: the full MISOCP, and the model built by compute_upper_bound.
+        The non-extended decomposition master has no p variables at all, and
+        the extended variants replace the cone with a polyhedral relaxation.
+        """
+        return self.model_type == 'arc' and not self.extended and not self.decomposition
 
     def _create_tour_constraints(self):
         """
@@ -115,15 +162,36 @@ class CETSP_L2_Solver:
         """
         if not self.extended:
             if self.model_type == 'arc':
-                self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n)), name="neighborhood")
+                # radii[i] == 0 targets are already pinned to their center by
+                # _apply_arc_point_bounds, so the cone would only add a
+                # degenerate (empty-interior) constraint that hurts the barrier.
+                self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             elif self.model_type == 'seq':
+                # x[0,0] == 1 is fixed (fix_start), so tour POSITION 0 always
+                # holds target 0. When that target has r = 0 (the depot) the cone
+                # at position 0 reads ||p_0 - c_0|| <= 0: an empty-interior
+                # constraint, and it is known at build time. Pin the point and
+                # skip the cone. Leaving it in understates the reported tour by
+                # up to 3.6e-02.
+                degenerate_start = self.data.radii[0] == 0.0
+                positions = range(1, self.n) if degenerate_start else range(self.n)
+                if degenerate_start:
+                    self.p_x[0].LB = self.p_x[0].UB = self.data.centers[0][0]
+                    self.p_y[0].LB = self.p_y[0].UB = self.data.centers[0][1]
                 self.model.addConstrs(((self.p_x[k] - quicksum(self.x[i, k] * self.data.centers[i][0] for i in range(self.n)))**2 +
                                       (self.p_y[k] - quicksum(self.x[i, k] * self.data.centers[i][1] for i in range(self.n)))**2 <=
                                       quicksum(self.x[i, k] * self.data.radii[i] for i in range(self.n))**2
-                                      for k in range(self.n)), name="neighborhood")
+                                      for k in positions), name="neighborhood")
             elif self.model_type == 'perspective':
-                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_i_perspective")
-                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j), name="neighborhood_p_j_perspective")
+                # A zero-radius target (the depot) turns its cone into
+                # ||p - x c|| <= 0, an empty-interior constraint with no strictly
+                # feasible point for the barrier. State it as the linear equality
+                # it actually is. Leaving it as a cone understates the reported
+                # tour by up to 1.6e-02 and can end the solve in GRB.NUMERIC.
+                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[i] > 0.0), name="neighborhood_p_i_perspective")
+                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[j] > 0.0), name="neighborhood_p_j_perspective")
+                self.model.addConstrs((self.p_i[i, j, dim] == self.x[i, j] * self.data.centers[i][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[i] == 0.0), name="neighborhood_p_i_degenerate")
+                self.model.addConstrs((self.p_j[i, j, dim] == self.x[i, j] * self.data.centers[j][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[j] == 0.0), name="neighborhood_p_j_degenerate")
         else:
             self._create_approximated_socp_constraints('neighborhood')
 
@@ -309,8 +377,10 @@ class CETSP_L2_Solver:
         sub_model.setParam('OutputFlag', 0)
 
         if self.model_type == 'arc':
+            sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
             p_x = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
             p_y = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+            self._apply_arc_point_bounds(p_x, p_y)
             tour_arcs = []
             for i in range(self.n):
                 for j in range(self.n):
@@ -319,7 +389,7 @@ class CETSP_L2_Solver:
             
             d = sub_model.addVars(tour_arcs, vtype=GRB.CONTINUOUS, name="d")
             
-            sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n)), name="neighborhood")
+            sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             sub_model.addConstrs((d[i,j]**2 >= (p_x[i] - p_x[j])**2 + (p_y[i] - p_y[j])**2 for i,j in tour_arcs), name="distance")
 
             if not self.extended:
