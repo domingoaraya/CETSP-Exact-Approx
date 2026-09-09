@@ -58,10 +58,19 @@ class CETSPData:
         for i in range(self.n):
             for j in range(self.n):
                 if i != j:
-                    # Condition for L2 norm: Check if region j is inside region i
+                    # Condition for L2 norm: check whether region j is inside region i.
+                    # If disk_j is contained in disk_i then every point of disk_j is
+                    # also in disk_i, so visiting j automatically satisfies i: the
+                    # IMPLIED - hence redundant - constraint is i, not j. Dropping j
+                    # instead discards the binding requirement and loosens the
+                    # problem, understating the optimum by 10-20% on n=6, r=1
+                    # instances. It also removed the depot first, since a
+                    # zero-radius disk is contained in everything. Under the
+                    # corrected rule the depot can never be dropped: a disk is
+                    # contained in a radius-0 disk only if it is a duplicate depot.
                     distance_sq = (self.centers[i][0] - self.centers[j][0])**2 + (self.centers[i][1] - self.centers[j][1])**2
                     if np.sqrt(distance_sq) + self.radii[j] <= self.radii[i]:
-                        self.redundancies.append(j)
+                        self.redundancies.append(i)
 
         if not self.redundancies:
             return
