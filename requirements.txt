@@ -1,0 +1,9 @@
+# Versions this code has been run and reported with.
+gurobipy==12.0.2
+numpy==2.2.6
+numba==0.61.2
+pandas==2.2.3
+scipy==1.15.3
+tqdm==4.67.0
+networkx==3.4.2
+matplotlib
