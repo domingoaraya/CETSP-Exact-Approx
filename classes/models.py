@@ -22,8 +22,10 @@ class CETSPModel:
             decomposition (bool): Whether to use Benders decomposition. Defaults to False.
             extended (bool): Whether to use the extended formulation for the L2 norm. Defaults to False.
             nu (int, optional): The parameter for the extended formulation. Defaults to 3.
-            cut_type (str, optional): The type of cut for decompositions ('dual' or 'enumerative'). Defaults to 'enumerative'.
+            cut_type (str, optional): The type of cut for decompositions ('dual', 'enumerative' or 'dual+enumerative'). Defaults to 'enumerative'.
             strengthen (bool): Whether to use DFJ cut separation at the root node. Defaults to False.
+            optimize_coefficients (bool): Whether to minimise the perspective dual cut's coefficients on arcs outside the support, instead of the trivial completion. Only affects 'perspective' with dual cuts. Defaults to False.
+            threads (int, optional): Gurobi threads for every model built by this run, including the subproblems and the upper bound solve. 0 lets Gurobi choose. Defaults to 0.
         """
         self.data = data
         self.model_type = model_type
