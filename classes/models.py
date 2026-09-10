@@ -282,7 +282,9 @@ class CETSPModel:
                     self._record_subproblem_failure("MIPSOL callback")
                     return
 
-                if sub_obj < -1e-6:
+                # Dual cuts on extended formulations can lead to subproblem taking
+                # negative value due to their involvement of the distance variables.
+                if not self.extended and sub_obj < -1e-6:
                     self._record_subproblem_failure(
                         f"negative Q(x_hat)={sub_obj:.6g}.")
                     return

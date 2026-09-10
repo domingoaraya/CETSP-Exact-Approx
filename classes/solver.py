@@ -393,7 +393,9 @@ class CETSP_L2_Solver:
             else:
                 sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
-            if sub_model.status == GRB.OPTIMAL or sub_model.status == GRB.SUBOPTIMAL:
+            # Primal minimization: a suboptimal solve returns Q >= Q*, and the
+            # enumerative cut built from it removes a feasible point.
+            if sub_model.status == GRB.OPTIMAL:
                 return self._subproblem_objective(sub_model), {}
             else:
                 return None, None
@@ -544,7 +546,7 @@ class CETSP_L2_Solver:
 
             sub_model.optimize()
 
-            if sub_model.status in [GRB.OPTIMAL, GRB.SUBOPTIMAL]:
+            if sub_model.status == GRB.OPTIMAL:
                 sub_obj = self._subproblem_objective(sub_model)
                 pi_tau = sink_constr.Pi
                 gamma = {}
