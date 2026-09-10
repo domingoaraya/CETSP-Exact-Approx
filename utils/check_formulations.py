@@ -90,32 +90,37 @@ from classes.models import CETSPModel  # noqa: E402
 from classes.solver import CETSP_L2_Solver  # noqa: E402
 from utils.instance_handler import create_and_save_instance  # noqa: E402
 
-# label, model_type, decomposition, extended, cut_type
+# label, model_type, decomposition, extended, cut_type, optimize_coefficients
 #
 # Cut types are listed as separate entries rather than combined: a combined
 # 'dual+enumerative' run can converge on the strength of the enumerative cut
-# alone, which would mask a defective dual cut.
+# alone, which would mask a defective dual cut. The same reasoning makes
+# '-dual-OC' the diagnostic entry for coefficient optimisation.
 CONFIGURATIONS = [
-    ('ABF',           'arc',         False, False, None),
-    ('SBF',           'seq',         False, False, None),
-    ('PBF',           'perspective', False, False, None),
-    ('ABF-D',         'arc',         True,  False, None),
-    ('SBF-D-dual',    'seq',         True,  False, 'dual'),
-    ('SBF-D-enum',    'seq',         True,  False, 'enumerative'),
-    ('SBF-D-DE',      'seq',         True,  False, 'dual+enumerative'),
-    ('PBF-D-dual',    'perspective', True,  False, 'dual'),
-    ('PBF-D-enum',    'perspective', True,  False, 'enumerative'),
-    ('PBF-D-DE',      'perspective', True,  False, 'dual+enumerative'),
-    ('ABF-A',         'arc',         False, True,  None),
-    ('SBF-A',         'seq',         False, True,  None),
-    ('PBF-A',         'perspective', False, True,  None),
-    ('ABF-A-D',       'arc',         True,  True,  None),
-    ('SBF-A-D-dual',  'seq',         True,  True,  'dual'),
-    ('SBF-A-D-enum',  'seq',         True,  True,  'enumerative'),
-    ('SBF-A-D-DE',    'seq',         True,  True,  'dual+enumerative'),
-    ('PBF-A-D-dual',  'perspective', True,  True,  'dual'),
-    ('PBF-A-D-enum',  'perspective', True,  True,  'enumerative'),
-    ('PBF-A-D-DE',    'perspective', True,  True,  'dual+enumerative'),
+    ('ABF',             'arc',         False, False, None,               False),
+    ('SBF',             'seq',         False, False, None,               False),
+    ('PBF',             'perspective', False, False, None,               False),
+    ('ABF-D',           'arc',         True,  False, None,               False),
+    ('SBF-D-dual',      'seq',         True,  False, 'dual',             False),
+    ('SBF-D-enum',      'seq',         True,  False, 'enumerative',      False),
+    ('SBF-D-DE',        'seq',         True,  False, 'dual+enumerative', False),
+    ('PBF-D-dual',      'perspective', True,  False, 'dual',             False),
+    ('PBF-D-enum',      'perspective', True,  False, 'enumerative',      False),
+    ('PBF-D-DE',        'perspective', True,  False, 'dual+enumerative', False),
+    ('PBF-D-dual-OC',   'perspective', True,  False, 'dual',             True),
+    ('PBF-D-DE-OC',     'perspective', True,  False, 'dual+enumerative', True),
+    ('ABF-A',           'arc',         False, True,  None,               False),
+    ('SBF-A',           'seq',         False, True,  None,               False),
+    ('PBF-A',           'perspective', False, True,  None,               False),
+    ('ABF-A-D',         'arc',         True,  True,  None,               False),
+    ('SBF-A-D-dual',    'seq',         True,  True,  'dual',             False),
+    ('SBF-A-D-enum',    'seq',         True,  True,  'enumerative',      False),
+    ('SBF-A-D-DE',      'seq',         True,  True,  'dual+enumerative', False),
+    ('PBF-A-D-dual',    'perspective', True,  True,  'dual',             False),
+    ('PBF-A-D-enum',    'perspective', True,  True,  'enumerative',      False),
+    ('PBF-A-D-DE',      'perspective', True,  True,  'dual+enumerative', False),
+    ('PBF-A-D-dual-OC', 'perspective', True,  True,  'dual',             True),
+    ('PBF-A-D-DE-OC',   'perspective', True,  True,  'dual+enumerative', True),
 ]
 
 STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
@@ -153,7 +158,7 @@ def exact_tour_length(data, tour_arcs, mip_gap):
 
 
 def run_one(path, label, model_type, decomposition, extended, cut_type,
-            nu, time_limit, mip_gap):
+            optimize_coefficients, nu, time_limit, mip_gap):
     data = CETSPData.from_file(path)
     rec = {'formulation': label, 'status': None, 'ub': None, 'lb': None,
            'tour_len': None, 'ub_delta': None, 'runtime': None,
@@ -161,7 +166,8 @@ def run_one(path, label, model_type, decomposition, extended, cut_type,
     t0 = time.time()
     try:
         model = CETSPModel(data, model_type=model_type, decomposition=decomposition,
-                           extended=extended, nu=nu, cut_type=cut_type)
+                           extended=extended, nu=nu, cut_type=cut_type,
+                           optimize_coefficients=optimize_coefficients)
         model.build()
         model.model.setParam('MIPGap', mip_gap)
         model.optimize(time_limit)
@@ -293,8 +299,8 @@ def main():
             create_and_save_instance(n, r_min, r_max, inst)
 
         rows = []
-        for label, mt, dec, ext, ct in configs:
-            rec = run_one(path, label, mt, dec, ext, ct,
+        for label, mt, dec, ext, ct, oc in configs:
+            rec = run_one(path, label, mt, dec, ext, ct, oc,
                           args.nu, args.time_limit, args.mip_gap)
             rec.update(n=n, r_mean=rm, sigma=sg, instance=inst,
                        bracketing=is_bracketing(ext, dec))
