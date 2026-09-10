@@ -125,7 +125,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_nodes", type=int, nargs='+', default=[10, 15, 20], help="List of number of nodes (n) to test.")
     parser.add_argument("--r_mean", type=float, nargs='+', default=[0.25, 0.5, 1], help="List of mean radii (r) to test.")
     parser.add_argument("--sigma", type=float, nargs='+', default=[0, 0.2, 0.5], help="List of sigma values for radii variation.")
-    parser.add_argument("--model_type", type=str, nargs='+', default=['arc', 'seq', 'perspective'], choices=['arc', 'seq', 'perspective'], help="List of model types to test.") # Conectar B&S
+    parser.add_argument("--model_type", type=str, nargs='+', default=['arc', 'seq', 'perspective'], choices=['arc', 'seq', 'perspective', 'B&S'], help="List of model types to test.")
     parser.add_argument("--decomposition", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use decomposition (True/False).")
     parser.add_argument("--extended", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use extended formulation (True/False).")
     parser.add_argument("--sbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for sequence model decomposition.")
@@ -146,6 +146,19 @@ if __name__ == "__main__":
     
     configurations = []
     for model_type_val in args.model_type:
+        if model_type_val == 'B&S':
+            # B&S carries its own decomposition and refinement loop; the
+            # extended, cut-type and strengthening switches do not apply.
+            configurations.append({
+                'model_type': 'B&S',
+                'decomposition': False,
+                'extended': False,
+                'cut_type': None,
+                'nu': None,
+                'strengthen': False,
+                'optimize_coefficients': False
+            })
+            continue
         for decomposition_val in decomposition_options:
             for extended_val in extended_options:
                 for strengthen_val, oc_val in product(strengthen_options, oc_options):
@@ -202,6 +215,8 @@ if __name__ == "__main__":
             formulation_name = "SBF"
         elif model_type_str == 'perspective':
             formulation_name = "PBF"
+        elif model_type_str == 'B&S':
+            formulation_name = "B&S"
         else:
             formulation_name = "ABF"
 
