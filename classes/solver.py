@@ -2,6 +2,8 @@ from gurobipy import Model, GRB, LinExpr, quicksum
 import numpy as np
 import sys
 
+from classes.cut_coefficients import MAX_ITER, fill_coefficients, pack_instance
+
 # Flag to warn only once when Gurobi ObjVal disagrees with the stored objective.
 _objval_mismatch_warned = False
 
@@ -15,7 +17,8 @@ class CETSP_L2_Solver:
     This class is responsible for building the mathematical model in Gurobi.
     """
 
-    def __init__(self, model, data, model_type, decomposition=False, extended=False, nu=None):
+    def __init__(self, model, data, model_type, decomposition=False, extended=False, nu=None,
+                 optimize_coefficients=False):
         """
         Initializes the CETSP_L2_Solver.
 
@@ -26,6 +29,9 @@ class CETSP_L2_Solver:
             decomposition (bool): Whether to use decomposition.
             extended (bool): Whether to use the extended formulation.
             nu (int): The parameter for the extended formulation.
+            optimize_coefficients (bool): Minimise the perspective dual cut's
+                coefficients on arcs outside the support instead of using the
+                trivial gamma = 0 completion.
         """
         self.model = model
         self.data = data
@@ -34,6 +40,9 @@ class CETSP_L2_Solver:
         self.extended = extended
         self.nu = nu
         self.n = data.n
+        self.optimize_coefficients = optimize_coefficients and model_type == 'perspective'
+        if self.optimize_coefficients:
+            self._centers, self._radii = pack_instance(data)
 
     def build(self):
         """
@@ -489,7 +498,7 @@ class CETSP_L2_Solver:
                 gamma_vals = {(i, j, dim): gamma[i, j, dim].X for i, j in tour_arcs for dim in range(2)}
                 
                 # Reconstruct eta
-                eta_vals = {}
+                eta_vals = np.zeros((self.n, 2))
                 for i in range(self.n):
                     for dim in range(2):
                         eta_vals[i, dim] = 0.5 * (gamma_vals[i, nxt[i], dim] + gamma_vals[prv[i], i, dim])
@@ -508,8 +517,13 @@ class CETSP_L2_Solver:
                     lambda_i_vals[i, j] = float(np.sqrt(alpha_i_vals[i, j, 0]**2 + alpha_i_vals[i, j, 1]**2))
                     lambda_j_vals[i, j] = float(np.sqrt(alpha_j_vals[i, j, 0]**2 + alpha_j_vals[i, j, 1]**2))
 
+                succ = np.full(self.n, -1, dtype=np.int64)
+                for i, j in tour_arcs:
+                    succ[i] = j
+
                 duals = {
                     'eta': eta_vals,
+                    'succ': succ,
                     'alpha_i': alpha_i_vals,
                     'alpha_j': alpha_j_vals,
                     'lambda_i': lambda_i_vals,
@@ -651,6 +665,9 @@ class CETSP_L2_Solver:
                 lambda_j_vals = duals['lambda_j']
 
                 C = self._C_buf
+                if self.optimize_coefficients:
+                    fill_coefficients(self._centers, self._radii, eta_vals,
+                                      duals['succ'], C, MAX_ITER)
                 for i in range(self.n):
                     for j in range(self.n):
                         if i == j:
@@ -662,7 +679,7 @@ class CETSP_L2_Solver:
                                        + self.data.centers[j][0] * alpha_j_vals[i, j, 0]
                                        + self.data.centers[j][1] * alpha_j_vals[i, j, 1]
                                        + self.data.radii[j] * lambda_j_vals[i, j])
-                        else:
+                        elif not self.optimize_coefficients:
                             eta_i_0 = eta_vals[i, 0]
                             eta_i_1 = eta_vals[i, 1]
                             eta_j_0 = eta_vals[j, 0]

@@ -10,7 +10,8 @@ from classes.models import CETSPModel
 from classes.data_handling import CETSPData
 from utils.instance_handler import create_and_save_instance
 
-def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=False, decomposition=False, nu=None, cut_type=None, verbosity='high', strengthen=False):
+def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=False, decomposition=False, nu=None, cut_type=None, verbosity='high', strengthen=False,
+             optimize_coefficients=False):
     """
     Runs a test for a given configuration on a set of instances.
     """
@@ -25,6 +26,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             print(f"Using {cut_type} cuts for sequence decomposition")
         if strengthen:
             print(f"Using DFJ strengthening")
+        if optimize_coefficients:
+            print("Optimising the dual cut coefficients")
 
     folder = f"Instances/{n}_{r_min}_{r_max}"
     os.makedirs(folder, exist_ok=True)
@@ -67,7 +70,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             extended=extended,
             nu=nu,
             cut_type=cut_type,
-            strengthen=strengthen
+            strengthen=strengthen,
+            optimize_coefficients=optimize_coefficients
         )
         model.build()
         model.optimize(time_limit)
@@ -127,6 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--sbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for sequence model decomposition.")
     parser.add_argument("--pbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for perspective model decomposition.")
     parser.add_argument("--strengthen", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Use DFJ cut strengthening at root node (True/False).")
+    parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
 
     args = parser.parse_args()
@@ -135,6 +140,7 @@ if __name__ == "__main__":
     decomposition_options = [True if d == 'True' else False for d in args.decomposition]
     extended_options = [True if e == 'True' else False for e in args.extended]
     strengthen_options = [True if s == 'True' else False for s in args.strengthen]
+    oc_options = [True if o == 'True' else False for o in args.optimize_coefficients]
 
     final_results = []
     
@@ -142,7 +148,7 @@ if __name__ == "__main__":
     for model_type_val in args.model_type:
         for decomposition_val in decomposition_options:
             for extended_val in extended_options:
-                for strengthen_val in strengthen_options:
+                for strengthen_val, oc_val in product(strengthen_options, oc_options):
                     # DFJ strengthening is only valid for arc and cont formulations
                     if strengthen_val and model_type_val not in ['arc', 'perspective']:
                         continue
@@ -162,22 +168,31 @@ if __name__ == "__main__":
 
                         # Build the configuration using the determined cuts
                         for cut_type_val in cuts_to_use:
+                            # Coefficient optimisation only changes the perspective
+                            # dual cut; the False variant already covers the rest.
+                            if oc_val and not (model_type_val == 'perspective'
+                                               and 'dual' in cut_type_val):
+                                continue
                             configurations.append({
                                 'model_type': model_type_val,
                                 'decomposition': decomposition_val,
                                 'extended': extended_val,
                                 'cut_type': cut_type_val,
                                 'nu': args.nu if extended_val else None,
-                                'strengthen': strengthen_val
+                                'strengthen': strengthen_val,
+                                'optimize_coefficients': oc_val
                             })
                     else:
+                        if oc_val:
+                            continue
                         configurations.append({
                             'model_type': model_type_val,
                             'decomposition': decomposition_val,
                             'extended': extended_val,
                             'cut_type': None,
                             'nu': args.nu if extended_val else None,
-                            'strengthen': strengthen_val
+                            'strengthen': strengthen_val,
+                            'optimize_coefficients': False
                         })
 
     for config in configurations:
@@ -201,6 +216,8 @@ if __name__ == "__main__":
                 formulation_name += f"-{config['cut_type'][:4]}"
         if config['strengthen']:
             formulation_name += "-S"
+        if config['optimize_coefficients']:
+            formulation_name += "-OC"
 
         for n_nodes_val in args.n_nodes:
             for r_mean_val in args.r_mean:
@@ -220,7 +237,8 @@ if __name__ == "__main__":
                         nu=config['nu'],
                         cut_type=config['cut_type'],
                         verbosity=args.verbosity,
-                        strengthen=config['strengthen']
+                        strengthen=config['strengthen'],
+                        optimize_coefficients=config['optimize_coefficients']
                     )
 
                     for i in range(args.amount_of_instances):

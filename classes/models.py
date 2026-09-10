@@ -11,7 +11,8 @@ class CETSPModel:
     This class orchestrates the data handling, model building, and optimization process.
     """
 
-    def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False):
+    def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False,
+                 optimize_coefficients: bool = False):
         """
         Initializes the CETSPModel.
 
@@ -31,6 +32,7 @@ class CETSPModel:
         self.nu = nu
         self.cut_type = cut_type if cut_type is not None else 'enumerative'
         self.strengthen = strengthen
+        self.optimize_coefficients = optimize_coefficients
         self.model = Model("CETSP")
         self.solver = None
         self.upper_bound = None
@@ -55,7 +57,7 @@ class CETSPModel:
         Builds the optimization model.
         """
         self.data.eliminate_redundancies()
-        self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu)
+        self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu, self.optimize_coefficients)
         self.solver.build()
 
         # Initialize NetworkX graph for DFJ separation
