@@ -441,6 +441,7 @@ class CETSPModel:
 
             self.status = self.model.status
             self.lower_bound = self.model.ObjBound
+            self.node_count = self.model.NodeCount
 
             if self.model.solCount > 0:
                 x_sol = self.model.getAttr('X', self.solver.x)
