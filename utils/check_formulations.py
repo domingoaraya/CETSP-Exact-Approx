@@ -121,15 +121,21 @@ CONFIGURATIONS = [
     ('PBF-A-D-DE',      'perspective', True,  True,  'dual+enumerative', False),
     ('PBF-A-D-dual-OC', 'perspective', True,  True,  'dual',             True),
     ('PBF-A-D-DE-OC',   'perspective', True,  True,  'dual+enumerative', True),
+    ('B&S',             'B&S',         False, False, None,               False),
 ]
 
 STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
           9: 'Time_Limit', 11: 'Interrupted', 12: 'Numeric', 13: 'Suboptimal'}
 
 
-def is_bracketing(extended, decomposition):
-    """Extended and non-decomposed: the relaxation that brackets, see C6."""
-    return extended and not decomposition
+def is_bracketing(model_type, extended, decomposition):
+    """
+    Relaxations, which bracket the exact formulations rather than matching them
+    (see C6). Extended and non-decomposed, plus B&S, whose cell discretisation
+    makes it inexact by construction: its bound is a relaxation and its tour is
+    feasible but not necessarily optimal.
+    """
+    return model_type == 'B&S' or (extended and not decomposition)
 
 
 def exact_tour_length(data, tour_arcs, mip_gap):
@@ -303,7 +309,7 @@ def main():
             rec = run_one(path, label, mt, dec, ext, ct, oc,
                           args.nu, args.time_limit, args.mip_gap)
             rec.update(n=n, r_mean=rm, sigma=sg, instance=inst,
-                       bracketing=is_bracketing(ext, dec))
+                       bracketing=is_bracketing(mt, ext, dec))
             rows.append(rec)
             all_rows.append(rec)
             if rec['status'] != 'Optimal':
