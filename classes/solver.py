@@ -558,6 +558,7 @@ class CETSP_L2_Solver:
                         f_vars[(delta, sigma)] = f_var
                         c_cap[(delta, sigma)] = sub_model.addConstr(f_var <= 1.0, name=f"cap_{delta}_{sigma}")
 
+            flow_c = {}
             for i in range(1, self.n):
                 in_arcs = [(k, i_arc) for (k, i_arc) in tour_arcs if i_arc == i]
                 out_arcs = [(i_arc, j) for (i_arc, j) in tour_arcs if i_arc == i]
@@ -565,7 +566,7 @@ class CETSP_L2_Solver:
                 for delta in cells_by_target[i]:
                     in_flow = quicksum(f_vars[(sigma, delta)] for k, _ in in_arcs for sigma in cells_by_target[k] if (sigma, delta) in f_vars)
                     out_flow = quicksum(f_vars[(delta, sigma)] for _, j in out_arcs for sigma in cells_by_target[j] if (delta, sigma) in f_vars)
-                    sub_model.addConstr(in_flow - out_flow == 0, name=f"flow_cons_{delta}")
+                    flow_c[delta] = sub_model.addConstr(in_flow - out_flow == 0, name=f"flow_cons_{delta}")
 
             depot_out_arcs = [(i_arc, j) for (i_arc, j) in tour_arcs if i_arc == 0]
             depot_in_arcs = [(k, j_arc) for (k, j_arc) in tour_arcs if j_arc == 0]
@@ -581,15 +582,16 @@ class CETSP_L2_Solver:
             if sub_model.status == GRB.OPTIMAL:
                 sub_obj = self._subproblem_objective(sub_model)
                 pi_tau = sink_constr.Pi
-                gamma = {}
-                f_sol = {}
-                for key, cap_c in c_cap.items():
-                    gamma[key] = max(-cap_c.Pi, 0.0)
-                    f_sol[key] = f_vars[key].X
+                f_sol = {key: f_vars[key].X for key in c_cap}
+
+                # Node potentials. The depot's cell is the source when an arc
+                # leaves it and the sink when an arc enters it, so it is not in
+                # flow_c; the cut builder supplies 0 and pi_tau for those.
+                pi = {delta: c.Pi for delta, c in flow_c.items()}
 
                 duals = {
                     'pi_tau': pi_tau,
-                    'gamma': gamma,
+                    'pi': pi,
                     'f_sol': f_sol
                 }
                 return sub_obj, duals
@@ -730,16 +732,27 @@ class CETSP_L2_Solver:
             return None, None
 
         pi_tau = duals.get('pi_tau', 0.0)
-        gamma = duals.get('gamma', {})
+        pi = duals.get('pi', {})
 
         inactive_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and x_sol.get((i, j), 0) <= 0.5]
+
+        cells_by_target = {}
+        for key in self.data.bs_cells:
+            cells_by_target.setdefault(key[0], []).append(key)
 
         eta = {}
         eta_bar = {}
         for i, j in inactive_arcs:
-            cells_i = [key for key in self.data.bs_cells.keys() if key[0] == i]
-            cells_j = [key for key in self.data.bs_cells.keys() if key[0] == j]
-            eta_ij = sum(gamma.get((d, s), 0.0) for d in cells_i for s in cells_j)
+            m_ij = self.estimation[i, j]
+            eta_ij = 0.0
+            for delta in cells_by_target.get(i, []):
+                pi_d = 0.0 if i == 0 else pi.get(delta, 0.0)
+                for sigma in cells_by_target.get(j, []):
+                    d_ds = self.data.bs_distances.get((delta, sigma))
+                    if d_ds is None:
+                        continue
+                    pi_s = pi_tau if j == 0 else pi.get(sigma, 0.0)
+                    eta_ij += max(0.0, pi_s - (d_ds - m_ij) - pi_d)
             eta[(i, j)] = eta_ij
             eta_bar[(i, j)] = min(eta_ij, pi_tau)
 
@@ -751,11 +764,11 @@ class CETSP_L2_Solver:
             u02 = [arc for arc in inactive_arcs if eta_bar[arc] < pi_tau - rho]
 
             lhs = self.theta + quicksum((pi_tau - rho) * self.x[i, j] for i, j in u01) + quicksum(eta_bar[i, j] * self.x[i, j] for i, j in u02)
-            rhs = pi_tau - rho
+            rhs = pi_tau
         else:
             # Case B
             lhs = self.theta + quicksum((pi_tau / 2.0) * self.x[i, j] for i, j in inactive_arcs)
-            rhs = pi_tau / 2.0
+            rhs = pi_tau
 
         return lhs, rhs
 
