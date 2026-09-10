@@ -11,7 +11,7 @@ from classes.data_handling import CETSPData
 from utils.instance_handler import create_and_save_instance
 
 def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=False, decomposition=False, nu=None, cut_type=None, verbosity='high', strengthen=False,
-             optimize_coefficients=False):
+             optimize_coefficients=False, threads=0):
     """
     Runs a test for a given configuration on a set of instances.
     """
@@ -71,7 +71,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             nu=nu,
             cut_type=cut_type,
             strengthen=strengthen,
-            optimize_coefficients=optimize_coefficients
+            optimize_coefficients=optimize_coefficients,
+            threads=threads
         )
         model.build()
         model.optimize(time_limit)
@@ -132,6 +133,7 @@ if __name__ == "__main__":
     parser.add_argument("--pbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for perspective model decomposition.")
     parser.add_argument("--strengthen", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Use DFJ cut strengthening at root node (True/False).")
     parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
+    parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
 
     args = parser.parse_args()
@@ -253,7 +255,8 @@ if __name__ == "__main__":
                         cut_type=config['cut_type'],
                         verbosity=args.verbosity,
                         strengthen=config['strengthen'],
-                        optimize_coefficients=config['optimize_coefficients']
+                        optimize_coefficients=config['optimize_coefficients'],
+                        threads=args.threads
                     )
 
                     for i in range(args.amount_of_instances):

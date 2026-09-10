@@ -12,7 +12,7 @@ class CETSPModel:
     """
 
     def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False,
-                 optimize_coefficients: bool = False):
+                 optimize_coefficients: bool = False, threads: int = 0):
         """
         Initializes the CETSPModel.
 
@@ -33,6 +33,7 @@ class CETSPModel:
         self.cut_type = cut_type if cut_type is not None else 'enumerative'
         self.strengthen = strengthen
         self.optimize_coefficients = optimize_coefficients
+        self.threads = threads
         self.model = Model("CETSP")
         self.solver = None
         self.upper_bound = None
@@ -57,7 +58,8 @@ class CETSPModel:
         Builds the optimization model.
         """
         self.data.eliminate_redundancies()
-        self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu, self.optimize_coefficients)
+        self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu, self.optimize_coefficients,
+                                      threads=self.threads)
         self.solver.build()
 
         # Initialize NetworkX graph for DFJ separation
@@ -379,7 +381,7 @@ class CETSPModel:
         ub_model = Model("UB_Model")
         ub_model.setParam('OutputFlag', 0)
         model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'B&S'] else 'seq')
-        ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub)
+        ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads)
         ub_solver.build()
 
         # Fix integer variables

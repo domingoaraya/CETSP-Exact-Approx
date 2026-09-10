@@ -43,6 +43,7 @@ Experiments can be customized using the following parameters:
 - `--pbf_cut_type`: Cut type for perspective model decomposition. Same choices and defaults as above.
 - `--strengthen`: Use DFJ cut strengthening at the root node. Only available for ABF and PBF. Choices: `True`, `False` (default: `False`).
 - `--optimize_coefficients`: Optimize the PBF dual cut coefficients. Only applies to perspective decompositions using dual cuts; other configurations are skipped. Choices: `True`, `False` (default: `False`).
+- `--threads`: Gurobi threads per model, applied to the master, the subproblems and the upper bound solve alike. 0 lets Gurobi choose, 1 forces a single thread (default: 0).
 - `--verbosity`: Verbosity level for experiment output. Choices: `high`, `low` (default: `high`).
 
 `B&S` ignores the decomposition, extended, cut type and strengthening switches, since it carries its own decomposition and cell refinement loop. It always yields a single configuration.

@@ -18,7 +18,7 @@ class CETSP_L2_Solver:
     """
 
     def __init__(self, model, data, model_type, decomposition=False, extended=False, nu=None,
-                 optimize_coefficients=False):
+                 optimize_coefficients=False, threads=0):
         """
         Initializes the CETSP_L2_Solver.
 
@@ -32,6 +32,8 @@ class CETSP_L2_Solver:
             optimize_coefficients (bool): Minimise the perspective dual cut's
                 coefficients on arcs outside the support instead of using the
                 trivial gamma = 0 completion.
+            threads (int): Gurobi Threads for every model built here. 0 lets
+                Gurobi choose.
         """
         self.model = model
         self.data = data
@@ -40,6 +42,7 @@ class CETSP_L2_Solver:
         self.extended = extended
         self.nu = nu
         self.n = data.n
+        self.threads = threads
         self.optimize_coefficients = optimize_coefficients and model_type == 'perspective'
         if self.optimize_coefficients:
             self._centers, self._radii = pack_instance(data)
@@ -49,6 +52,7 @@ class CETSP_L2_Solver:
         Builds the CETSP model by creating variables, constraints, and the objective function.
         """
         self.model.setParam('OutputFlag', 0)
+        self.model.setParam('Threads', self.threads)
 
         if self.model_type == 'arc' and not self.extended and not self.decomposition:
             # Avoid numerical issues in arc-based SOCPs
@@ -398,6 +402,7 @@ class CETSP_L2_Solver:
         """
         sub_model = Model("subproblem")
         sub_model.setParam('OutputFlag', 0)
+        sub_model.setParam('Threads', self.threads)
 
         if self.model_type == 'arc':
             sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
@@ -537,6 +542,7 @@ class CETSP_L2_Solver:
         elif self.model_type == 'B&S':
             sub_model = Model("bs_subproblem")
             sub_model.setParam('OutputFlag', 0)
+            sub_model.setParam('Threads', self.threads)
 
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
 
