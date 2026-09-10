@@ -47,8 +47,6 @@ class CETSPModel:
         self.bs_history = []
         self.G = None
 
-
-
         self.subproblem_failures = 0
         self._sub_failure_warned = False
 
@@ -88,15 +86,11 @@ class CETSPModel:
             if self.strengthen and self.model_type in ['arc', 'perspective']:
                 self.model.Params.PreCrush = 1
 
-            #use_callback = self.decomposition or (self.strengthen and self.model_type in ['arc', 'perspective'])
             if self.decomposition:
                 # LazyConstraints is only needed for cbLazy (decomposition/Benders cuts)
                 self.model.Params.LazyConstraints = 1
 
-            #if use_callback:
             self.model.optimize(self._unified_callback)
-            #else:
-            #    self.model.optimize()
             
             self.runtime = self.model.Runtime
             self._retrieve_solution()
@@ -146,9 +140,6 @@ class CETSPModel:
 
             if sub_obj is None:
                 # Without a solved subproblem there is no f_sol to refine cells from.
-
-
-
                 self._record_subproblem_failure("optimize_bs initial subproblem")
                 break
 
@@ -178,9 +169,7 @@ class CETSPModel:
             # Re-solve subproblem using the newly tightened geometry
             refined_sub_obj, refined_duals = self.solver._solve_subproblem(x_sol, current_estimation)
 
-
             if refined_sub_obj is None:
-
                 self._record_subproblem_failure("optimize_bs refined subproblem")
             elif refined_sub_obj > current_estimation + 1e-5:
                 lhs, rhs = self.solver._generate_bs_cut_expr(x_sol, refined_duals)
@@ -293,19 +282,9 @@ class CETSPModel:
                     self._record_subproblem_failure("MIPSOL callback")
                     return
 
-                # Q(x_hat) >= 0 is PROVABLE for the non-extended master: it prices
-                # each arc at m_ij, a valid lower bound on that arc distance, so
-                # every (d_ij - m_ij) term is non-negative. A negative value can
-                # only mean the subproblem objective was read wrongly, and that is
-                # exactly the case that silently defeats the violation test below
-                # (theta has lb 0, so theta < sub_obj is false for any negative
-                # sub_obj and no cut is ever added). Fail loudly instead of
-                # deflating the bound. The extended master subtracts
-                # current_estimation, where a negative value is legitimate, so the
-                # check is scoped to non-extended.
-                if not self.extended and sub_obj < -1e-6:
+                if sub_obj < -1e-6:
                     self._record_subproblem_failure(
-                        f"negative Q(x_hat)={sub_obj:.6g}, which is provably impossible")
+                        f"negative Q(x_hat)={sub_obj:.6g}.")
                     return
 
                 if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
