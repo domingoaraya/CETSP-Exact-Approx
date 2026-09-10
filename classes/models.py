@@ -109,11 +109,14 @@ class CETSPModel:
             max_iterations (int, optional): Maximum cell refinement iterations. Defaults to 5.
         """
         start_time = time.time()
-        self.data.initialize_bs_cells()
         self.bs_history = []
 
-        # Build Master Problem outside loop so SECs and Benders cuts persist
-        self.build()
+        # Build Master Problem outside loop so SECs and Benders cuts persist.
+        # build() eliminates redundancies, which renumbers the targets, so the
+        # cells must be discretised after it or they describe the wrong disks.
+        if self.solver is None:
+            self.build()
+        self.data.initialize_bs_cells()
         self.model.Params.LazyConstraints = 1
 
         for iteration in range(max_iterations):
@@ -181,6 +184,7 @@ class CETSPModel:
 
         self.runtime = time.time() - start_time
         self.lower_bound = self.model.ObjBound
+        self.node_count = self.model.NodeCount
 
         if self.model.solCount > 0:
             x_sol = self.model.getAttr('X', self.solver.x)
