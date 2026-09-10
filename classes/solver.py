@@ -49,6 +49,8 @@ class CETSP_L2_Solver:
             self._build_bs_master_model()
         elif self.decomposition:
             self._build_decomposition_model()
+            if self.model_type == 'perspective':
+                self._prepare_dual_cut_buffers()
         else:
             self._create_variables()
             self._create_tour_constraints()
@@ -63,6 +65,22 @@ class CETSP_L2_Solver:
                 raise ValueError("Invalid model type specified.")
 
             self._set_objective()
+
+    def _prepare_dual_cut_buffers(self):
+        """
+        Preallocates the perspective dual cut's variable list and C array. Only
+        the coefficients change between callbacks.
+        """
+        pairs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j]
+        self._cut_rows = np.array([i for i, j in pairs], dtype=np.intp)
+        self._cut_cols = np.array([j for i, j in pairs], dtype=np.intp)
+        self._cut_vars = [self.x[i, j] for i, j in pairs]
+        if self.extended:
+            self._cut_vars = self._cut_vars + [self.d[i, j] for i, j in pairs]
+            self._cut_tail = [-1.0] * len(pairs)
+        else:
+            self._cut_tail = []
+        self._C_buf = np.zeros((self.n, self.n))
 
     def _build_bs_master_model(self):
         """
@@ -632,7 +650,7 @@ class CETSP_L2_Solver:
                 lambda_i_vals = duals['lambda_i']
                 lambda_j_vals = duals['lambda_j']
 
-                C = {}
+                C = self._C_buf
                 for i in range(self.n):
                     for j in range(self.n):
                         if i == j:
@@ -659,9 +677,10 @@ class CETSP_L2_Solver:
                                        + norm_eta_j * self.data.radii[j])
 
                 if not self.extended:
-                    self.model.cbLazy(quicksum(-self.x[i, j] * (self.estimation[i, j] + C[i, j]) for i in range(self.n) for j in range(self.n) if i != j) <= self.theta)
+                    coeffs = (-(self.estimation + C))[self._cut_rows, self._cut_cols].tolist()
                 else:
-                    self.model.cbLazy(quicksum(-self.x[i, j] * C[i, j] - self.d[i, j] for i in range(self.n) for j in range(self.n) if i != j) <= self.theta)
+                    coeffs = (-C)[self._cut_rows, self._cut_cols].tolist() + self._cut_tail
+                self.model.cbLazy(LinExpr(coeffs, self._cut_vars) <= self.theta)
 
             if 'enumerative' in cut_type:
                 delta = LinExpr()
