@@ -45,6 +45,7 @@ Experiments can be customized using the following parameters:
 - `--optimize_coefficients`: Optimize the PBF dual cut coefficients. Only applies to perspective decompositions using dual cuts; other configurations are skipped. Choices: `True`, `False` (default: `False`).
 - `--threads`: Gurobi threads per model, applied to the master, the subproblems and the upper bound solve alike. 0 lets Gurobi choose, 1 forces a single thread (default: 0).
 - `--verbosity`: Verbosity level for experiment output. Choices: `high`, `low` (default: `high`).
+- `--outfile`: CSV file where results are written (default: `Results/experiment_results.csv`). Each row is appended as soon as its instance finishes. If the file already exists, every `(Formulation, n, r_min, r_max, Instance)` combination already recorded in it is skipped.
 
 `B&S` ignores the decomposition, extended, cut type and strengthening switches, since it carries its own decomposition and cell refinement loop. It always yields a single configuration.
 
@@ -53,6 +54,9 @@ To run a specific experiment with a time limit of 300 seconds on instances with 
 ```bash
 python run_experiment.py --time_limit 300 --n_nodes 10 --model_type arc --decomposition True --extended False
 ```
+
+### Resuming an interrupted experiment
+Results are appended to `--outfile` after each instance is solved. If the run is killed (Ctrl-C, job time limit, crash), simply launch the same command again with the same `--outfile`; completed runs are detected from the file and skipped. Delete the file (or point `--outfile` elsewhere) to start from scratch.
 
 ### Formulation labels
 

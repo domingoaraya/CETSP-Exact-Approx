@@ -1,20 +1,175 @@
-import pandas as pd
 import os
 import tqdm
-import numpy as np
 from itertools import product
 import argparse
+import csv
 from gurobipy import GRB
 
 from classes.models import CETSPModel
 from classes.data_handling import CETSPData
 from utils.instance_handler import create_and_save_instance
 
-def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=False, decomposition=False, nu=None, cut_type=None, verbosity='high', strengthen=False,
+RESULT_COLUMNS = [
+    "Formulation", "n", "r_min", "r_max", "Instance",
+    "UB", "LB", "Root Bound", "Nodes", "Status", "Gap", "Time",
+    "Cuts", "DFJ_Cuts", "Sub_Failures",
+]
+
+# Number of decimals used when comparing radii keys between the CSV and the
+# values computed at runtime (guards against float repr noise such as
+# 0.12500000000000003 vs 0.125).
+KEY_DECIMALS = 8
+
+
+def result_key(formulation, n, r_min, r_max, instance):
+    """Canonical key identifying one (configuration, instance) run."""
+    return (str(formulation), int(n), round(float(r_min), KEY_DECIMALS),
+            round(float(r_max), KEY_DECIMALS), int(instance))
+
+
+def load_completed_runs(outfile):
+    """
+    Reads an existing results CSV and returns the set of keys already solved.
+    Returns an empty set if the file does not exist or is empty.
+    Raises ValueError if the header does not match RESULT_COLUMNS.
+    """
+    if not os.path.exists(outfile) or os.path.getsize(outfile) == 0:
+        return set()
+
+    with open(outfile, "r", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames is None:
+            return set()
+        if list(reader.fieldnames) != RESULT_COLUMNS:
+            raise ValueError(
+                f"{outfile} exists but its header does not match the expected "
+                f"columns.\n  found:    {reader.fieldnames}\n  expected: {RESULT_COLUMNS}\n"
+                "Use a different --outfile or remove the file to start over."
+            )
+        completed = set()
+        for row in reader:
+            try:
+                completed.add(result_key(row["Formulation"], row["n"], row["r_min"],
+                                         row["r_max"], row["Instance"]))
+            except (KeyError, ValueError):
+                # Skip malformed / partially written trailing rows
+                continue
+    return completed
+
+
+class ResultsWriter:
+    """
+    Appends result rows to a CSV as they are produced, flushing after each
+    write so that an interrupted run leaves a usable file behind.
+    """
+    def __init__(self, outfile):
+        self.outfile = outfile
+        os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        write_header = (not os.path.exists(outfile)) or os.path.getsize(outfile) == 0
+        self._fh = open(outfile, "a", newline="")
+        self._writer = csv.DictWriter(self._fh, fieldnames=RESULT_COLUMNS)
+        if write_header:
+            self._writer.writeheader()
+            self._fh.flush()
+
+    def write(self, row):
+        self._writer.writerow(row)
+        self._fh.flush()
+        os.fsync(self._fh.fileno())
+
+    def close(self):
+        self._fh.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def solve_instance(instance_path, model_type, time_limit, extended, decomposition, nu,
+                   cut_type, strengthen, optimize_coefficients, threads):
+    """
+    Solves a single instance and returns a dict with the metric columns
+    (everything in RESULT_COLUMNS except the identifying key).
+    """
+    cetsp_data = CETSPData.from_file(instance_path)
+
+    model = CETSPModel(
+        cetsp_data,
+        model_type=model_type,
+        decomposition=decomposition,
+        extended=extended,
+        nu=nu,
+        cut_type=cut_type,
+        strengthen=strengthen,
+        optimize_coefficients=optimize_coefficients,
+        threads=threads
+    )
+    model.build()
+    model.optimize(time_limit)
+
+    summary = model.get_solution_summary()
+
+    if isinstance(summary, dict):
+        if model.model.Status == GRB.OPTIMAL:
+            status = "Optimal"
+        elif model.model.Status == GRB.SUBOPTIMAL:
+            status = "Suboptimal"
+        elif model.model.Status == GRB.TIME_LIMIT:
+            status = "Time_Limit"
+        else:
+            status = f"Other_{model.model.Status}"
+        return {
+            "UB": summary.get('upper_bound', float('inf')),
+            "LB": summary.get('lower_bound', 0.0),
+            "Root Bound": summary.get('root_bound', float('inf')),
+            "Nodes": summary.get('node_count', 0),
+            "Status": status,
+            "Gap": summary.get('gap', 0),
+            "Time": summary.get('runtime', 0),
+            "Cuts": summary.get('cuts_added', 0),
+            "DFJ_Cuts": summary.get('dfj_cuts', 0),
+            "Sub_Failures": summary.get('subproblem_failures', 0),
+        }
+    else:
+        return {
+            "UB": float('inf'),
+            "LB": 0.0,
+            "Root Bound": float('inf'),
+            "Nodes": 0,
+            "Status": "Failed",
+            "Gap": float('inf'),
+            "Time": time_limit,
+            "Cuts": 0,
+            "DFJ_Cuts": 0,
+            "Sub_Failures": getattr(model, 'subproblem_failures', 0),
+        }
+
+
+def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
+             completed, time_limit=600, extended=False, decomposition=False, nu=None,
+             cut_type=None, verbosity='high', strengthen=False,
              optimize_coefficients=False, threads=0):
     """
     Runs a test for a given configuration on a set of instances.
+
+    Instances whose key is already in `completed` are skipped. Each newly
+    solved instance is written to `writer` immediately and added to
+    `completed`. Returns the number of instances solved in this call.
     """
+    folder = f"Instances/{n}_{r_min}_{r_max}"
+    os.makedirs(folder, exist_ok=True)
+
+    # Generate instances if they don't exist
+    current_instances = os.listdir(folder)
+    if len(current_instances) < repetitions:
+        for i in range(len(current_instances), repetitions):
+            create_and_save_instance(n, r_min, r_max, i)
+
+    pending = [i for i in range(repetitions)
+               if result_key(formulation_name, n, r_min, r_max, i) not in completed]
+
     if verbosity == 'high':
         print(f"\nRunning {repetitions} instances of {n} cities with radii between {r_min} and {r_max}")
         print(f"Using {model_type}-based formulation, time limit of {time_limit} seconds")
@@ -28,86 +183,33 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
             print(f"Using DFJ strengthening")
         if optimize_coefficients:
             print("Optimising the dual cut coefficients")
+        skipped = repetitions - len(pending)
+        if skipped:
+            print(f"Skipping {skipped} instance(s) already present in {writer.outfile}")
 
-    folder = f"Instances/{n}_{r_min}_{r_max}"
-    os.makedirs(folder, exist_ok=True)
-    
-    # Generate instances if they don't exist
-    current_instances = os.listdir(folder)
-    if len(current_instances) < repetitions:
-        for i in range(len(current_instances), repetitions):
-            create_and_save_instance(n, r_min, r_max, i)
+    if not pending:
+        return 0
 
-    instances_to_run = [f"instance_{i}.txt" for i in range(repetitions)]
+    pbar = tqdm.tqdm(total=len(pending), desc="Solving instances") if verbosity == 'high' else None
 
-    results = {
-        'ub': [],
-        'lb': [],
-        'root_bound': [],
-        'node_count': [],
-        'status': [],
-        'gap': [],
-        'runtime': [],
-        'cuts': [],
-        'dfj_cuts': [],
-        'sub_failures': []
-    }
+    for i in pending:
+        instance_path = os.path.join(folder, f"instance_{i}.txt")
 
-    if verbosity == 'high':
-        pbar = tqdm.tqdm(total=repetitions, desc="Solving instances")
-    else:
-        pbar = None
-
-    for instance_file in instances_to_run:
-        instance_path = os.path.join(folder, instance_file)
-        
-        cetsp_data = CETSPData.from_file(instance_path)
-
-        model = CETSPModel(
-            cetsp_data,
-            model_type=model_type,
-            decomposition=decomposition,
-            extended=extended,
-            nu=nu,
-            cut_type=cut_type,
-            strengthen=strengthen,
-            optimize_coefficients=optimize_coefficients,
-            threads=threads
+        metrics = solve_instance(
+            instance_path, model_type, time_limit, extended, decomposition, nu,
+            cut_type, strengthen, optimize_coefficients, threads
         )
-        model.build()
-        model.optimize(time_limit)
 
-        summary = model.get_solution_summary()
-
-        if isinstance(summary, dict):
-            if model.model.Status == GRB.OPTIMAL:
-                results['status'].append("Optimal")
-            elif model.model.Status == GRB.SUBOPTIMAL:
-                results['status'].append("Suboptimal")
-            elif model.model.Status == GRB.TIME_LIMIT:
-                results['status'].append("Time_Limit")
-            else:
-                results['status'].append(f"Other_{model.model.Status}")
-            results['ub'].append(summary.get('upper_bound', float('inf')))
-            results['lb'].append(summary.get('lower_bound', 0.0))
-            results['root_bound'].append(summary.get('root_bound', float('inf')))
-            results['node_count'].append(summary.get('node_count', 0))
-            results['gap'].append(summary.get('gap', 0))
-            results['runtime'].append(summary.get('runtime', 0))
-            results['cuts'].append(summary.get('cuts_added', 0))
-            results['dfj_cuts'].append(summary.get('dfj_cuts', 0))
-            results['sub_failures'].append(summary.get('subproblem_failures', 0))
-        else:
-            results['status'].append("Failed")
-            results['ub'].append(float('inf'))
-            results['lb'].append(0.0)
-            results['root_bound'].append(float('inf'))
-            results['node_count'].append(0)
-            results['gap'].append(float('inf'))
-            results['runtime'].append(time_limit)
-            results['cuts'].append(0)
-            results['dfj_cuts'].append(0)
-            results['sub_failures'].append(getattr(model, 'subproblem_failures', 0))
+        row = {
+            "Formulation": formulation_name,
+            "n": n,
+            "r_min": r_min,
+            "r_max": r_max,
+            "Instance": i,
+        }
+        row.update(metrics)
+        writer.write(row)
+        completed.add(result_key(formulation_name, n, r_min, r_max, i))
 
         if pbar:
             pbar.update(1)
@@ -115,7 +217,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, time_limit=600, extended=
     if pbar:
         pbar.close()
 
-    return results
+    return len(pending)
 
 
 if __name__ == "__main__":
@@ -135,6 +237,10 @@ if __name__ == "__main__":
     parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
     parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
+    parser.add_argument("--outfile", type=str, default="Results/experiment_results.csv",
+                        help="CSV file where results are appended as each instance finishes. "
+                             "If the file already exists, runs already recorded in it are skipped, "
+                             "so re-running the same command resumes an interrupted experiment.")
 
     args = parser.parse_args()
 
@@ -144,8 +250,6 @@ if __name__ == "__main__":
     strengthen_options = [True if s == 'True' else False for s in args.strengthen]
     oc_options = [True if o == 'True' else False for o in args.optimize_coefficients]
 
-    final_results = []
-    
     configurations = []
     for model_type_val in args.model_type:
         if model_type_val == 'B&S':
@@ -210,82 +314,65 @@ if __name__ == "__main__":
                             'optimize_coefficients': False
                         })
 
-    for config in configurations:
-        model_type_str = config['model_type']
-        
-        if model_type_str == 'seq':
-            formulation_name = "SBF"
-        elif model_type_str == 'perspective':
-            formulation_name = "PBF"
-        elif model_type_str == 'B&S':
-            formulation_name = "B&S"
-        else:
-            formulation_name = "ABF"
+    completed = load_completed_runs(args.outfile)
+    if completed:
+        print(f"Resuming: {len(completed)} run(s) already recorded in {args.outfile}")
 
-        if config['extended']:
-            formulation_name += "-A"
-        if config['decomposition']:
-            formulation_name += "-D"
-        if config['cut_type']:
-            if config['cut_type'] == 'dual+enumerative':
-                formulation_name += "-DE"
+    total_solved = 0
+    with ResultsWriter(args.outfile) as writer:
+        for config in configurations:
+            model_type_str = config['model_type']
+
+            if model_type_str == 'seq':
+                formulation_name = "SBF"
+            elif model_type_str == 'perspective':
+                formulation_name = "PBF"
+            elif model_type_str == 'B&S':
+                formulation_name = "B&S"
             else:
-                formulation_name += f"-{config['cut_type'][:4]}"
-        if config['strengthen']:
-            formulation_name += "-S"
-        if config['optimize_coefficients']:
-            formulation_name += "-OC"
+                formulation_name = "ABF"
 
-        for n_nodes_val in args.n_nodes:
-            for r_mean_val in args.r_mean:
-                for sigma_val in args.sigma:
-                    r_min_val = r_mean_val * (1 - sigma_val)
-                    r_max_val = r_mean_val * (1 + sigma_val)
+            if config['extended']:
+                formulation_name += "-A"
+            if config['decomposition']:
+                formulation_name += "-D"
+            if config['cut_type']:
+                if config['cut_type'] == 'dual+enumerative':
+                    formulation_name += "-DE"
+                else:
+                    formulation_name += f"-{config['cut_type'][:4]}"
+            if config['strengthen']:
+                formulation_name += "-S"
+            if config['optimize_coefficients']:
+                formulation_name += "-OC"
 
-                    instance_results = run_test(
-                        repetitions=args.amount_of_instances,
-                        n=n_nodes_val,
-                        r_min=r_min_val,
-                        r_max=r_max_val,
-                        model_type=config['model_type'],
-                        time_limit=args.time_limit,
-                        extended=config['extended'],
-                        decomposition=config['decomposition'],
-                        nu=config['nu'],
-                        cut_type=config['cut_type'],
-                        verbosity=args.verbosity,
-                        strengthen=config['strengthen'],
-                        optimize_coefficients=config['optimize_coefficients'],
-                        threads=args.threads
-                    )
+            for n_nodes_val in args.n_nodes:
+                for r_mean_val in args.r_mean:
+                    for sigma_val in args.sigma:
+                        r_min_val = r_mean_val * (1 - sigma_val)
+                        r_max_val = r_mean_val * (1 + sigma_val)
 
-                    for i in range(args.amount_of_instances):
-                        row_data = {
-                            "Formulation": formulation_name,
-                            "n": n_nodes_val,
-                            "r_min": r_min_val,
-                            "r_max": r_max_val,
-                            "Instance": i,
-                            "UB": instance_results['ub'][i],
-                            "LB": instance_results['lb'][i],
-                            "Root Bound": instance_results['root_bound'][i],
-                            "Nodes": instance_results['node_count'][i],
-                            "Status": instance_results['status'][i],
-                            "Gap": instance_results['gap'][i],
-                            "Time": instance_results['runtime'][i],
-                            "Cuts": instance_results['cuts'][i],
-                            "DFJ_Cuts": instance_results['dfj_cuts'][i],
-                            "Sub_Failures": instance_results['sub_failures'][i],
-                        }
-                        final_results.append(row_data)
-                    
-        if args.verbosity == 'low':
-            print(f"Finished {formulation_name}")
+                        total_solved += run_test(
+                            repetitions=args.amount_of_instances,
+                            n=n_nodes_val,
+                            r_min=r_min_val,
+                            r_max=r_max_val,
+                            model_type=config['model_type'],
+                            formulation_name=formulation_name,
+                            writer=writer,
+                            completed=completed,
+                            time_limit=args.time_limit,
+                            extended=config['extended'],
+                            decomposition=config['decomposition'],
+                            nu=config['nu'],
+                            cut_type=config['cut_type'],
+                            verbosity=args.verbosity,
+                            strengthen=config['strengthen'],
+                            optimize_coefficients=config['optimize_coefficients'],
+                            threads=args.threads
+                        )
 
-    results_df = pd.DataFrame(final_results)
-    
-    # Ensure 'Results' directory exists
-    os.makedirs("Results", exist_ok=True)
-    results_df.to_csv("Results/experiment_results.csv", index=False)
-    
-    print("\nExperiment finished. Results saved to Results/experiment_results.csv")
+            if args.verbosity == 'low':
+                print(f"Finished {formulation_name}")
+
+    print(f"\nExperiment finished. {total_solved} new run(s) written to {args.outfile}")
