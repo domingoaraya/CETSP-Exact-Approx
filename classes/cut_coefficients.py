@@ -103,6 +103,10 @@ def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
         gx /= ng
         gy /= ng
 
+    if _h(0.0, 0.0, cx, cy, r1, r2, e1x, e1y, e2x, e2y) < _h(gx, gy, cx, cy, r1, r2, e1x, e1y, e2x, e2y):
+        gx = 0.0
+        gy = 0.0
+
     for _ in range(max_iter):
         ax = gx - e1x
         ay = gy - e1y

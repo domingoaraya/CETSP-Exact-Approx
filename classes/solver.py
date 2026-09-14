@@ -154,7 +154,7 @@ class CETSP_L2_Solver:
 
     def _create_degree_constraints(self):
         """
-        Creates the constraints to ensure a valid tour is formed.
+        Creates the degree and loop constraints.
         """
         # Each region must be visited exactly once
         self.model.addConstrs((self.x.sum(i, '*') == 1 for i in range(self.n)), name="visit_once")
@@ -351,7 +351,7 @@ class CETSP_L2_Solver:
         if self.model_type in ['arc', 'perspective']:
             self._create_subtour_elimination_constraints()
         elif self.model_type == "seq":
-            self.model.addConstr(self.x[0, 0] == 1, name="fix_start")
+            self.x[0, 0].lb = 1
         
         if self.extended:
             if self.model_type == "arc":
@@ -792,6 +792,7 @@ class CETSP_L2_Solver:
         """
         Creates the constraints and variables specific to the sequence formulation.
         """
+        self.x[0, 0].lb = 1
         self._create_neighborhood_constraints()
         self._create_distance_constraints()
 
