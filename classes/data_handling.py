@@ -62,6 +62,10 @@ class CETSPData:
                     # If disk_j is contained in disk_i then every point of disk_j is
                     # also in disk_i, so visiting j automatically satisfies i.
                     distance_sq = (self.centers[i][0] - self.centers[j][0])**2 + (self.centers[i][1] - self.centers[j][1])**2
+
+                    # In case both regions are equal
+                    if distance_sq == 0 and self.radii[j] == self.radii[i] and i < j:
+                        continue
                     if np.sqrt(distance_sq) + self.radii[j] <= self.radii[i]:
                         self.redundancies.append(i)
 

@@ -52,7 +52,7 @@ def plot_time_gap_core(ax, dfs, labels=None, colors=None, split_point=300, gap_r
             y_time += list(range(1, len(optimal) + 1))
 
         # --- Process Gaps (Right) ---
-        time_limit = df[df['Status'].isin(['Time_limit', 'Suboptimal'])].sort_values('Gap')
+        time_limit = df[df['Status'].isin(['Time_Limit', 'Suboptimal'])].sort_values('Gap')
         
         x_gap, y_gap = [], []
         if not time_limit.empty:

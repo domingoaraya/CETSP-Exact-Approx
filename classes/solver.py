@@ -66,7 +66,7 @@ class CETSP_L2_Solver:
                 self._prepare_dual_cut_buffers()
         else:
             self._create_variables()
-            self._create_tour_constraints()
+            self._create_degree_constraints()
 
             if self.model_type == "arc":
                 self._create_arc_formulation_specific_parts()
@@ -100,7 +100,7 @@ class CETSP_L2_Solver:
         Builds the master problem for the Behdani & Smith (B&S) formulation.
         """
         self._create_variables()
-        self._create_tour_constraints()
+        self._create_degree_constraints()
         self._set_objective()
 
     def _create_variables(self):
@@ -152,7 +152,7 @@ class CETSP_L2_Solver:
             p_x[i].LB, p_x[i].UB = cx - r, cx + r
             p_y[i].LB, p_y[i].UB = cy - r, cy + r
 
-    def _create_tour_constraints(self):
+    def _create_degree_constraints(self):
         """
         Creates the constraints to ensure a valid tour is formed.
         """
@@ -347,7 +347,7 @@ class CETSP_L2_Solver:
         Builds the master problem for the Benders decomposition.
         """
         self._create_variables()
-        self._create_tour_constraints()
+        self._create_degree_constraints()
         if self.model_type in ['arc', 'perspective']:
             self._create_subtour_elimination_constraints()
         elif self.model_type == "seq":
@@ -657,8 +657,8 @@ class CETSP_L2_Solver:
                     else:
                         delta_rev += (1 - self.x[i,k])
                 
-                self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
-                self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+                self.model.cbLazy(-(sub_obj/4)*delta + sub_obj <= self.theta)
+                self.model.cbLazy(-(sub_obj/4)*delta_rev + sub_obj <= self.theta)
 
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
@@ -792,9 +792,6 @@ class CETSP_L2_Solver:
         """
         Creates the constraints and variables specific to the sequence formulation.
         """
-        # Fix x[0,0] to 1 to break symmetry
-        self.model.addConstr(self.x[0, 0] == 1, name="fix_start")
-        self._create_tour_constraints()
         self._create_neighborhood_constraints()
         self._create_distance_constraints()
 
