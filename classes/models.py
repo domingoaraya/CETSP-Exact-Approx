@@ -445,42 +445,45 @@ class CETSPModel:
         """
         Retrieves the solution from the solved model.
         """
-        if self.model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL]:
 
-            self.status = self.model.status
+        self.status = self.model.status
+        try:
             self.lower_bound = self.model.ObjBound
+        except Exception:
+            self.lower_bound = 0.0
+        try:
             self.node_count = self.model.NodeCount
+        except Exception:
+            self.node_count = None
 
-            if self.model.solCount > 0:
-                x_sol = self.model.getAttr('X', self.solver.x)
+        if self.model.solCount > 0:
+            x_sol = self.model.getAttr('X', self.solver.x)
 
-                if self.extended and not self.decomposition:
-                    # For extended formulations without decomposition, solve an exact SOCP to get the feasible solution
-                    ub_obj_val, ub_arcs, ub_points = self.compute_upper_bound(x_sol)
-                    self.upper_bound = ub_obj_val
-                    self.arcs = ub_arcs
-                    self.points = ub_points
-                else:
-                    # For all other formulations the model objective is the true UB.
-                    self.upper_bound = self.model.ObjVal
-                    self._extract_arcs_and_points()
-
-                    if self.decomposition and not self.extended:
-                        # For non-extended decompositions, extract points for plotting without overriding the upper bound.
-                        _, _, plot_points = self.compute_upper_bound(x_sol)
-                        if plot_points:
-                            self.points = plot_points
-
-                # Recalculate gap robustly
-                if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
-                    self.gap = (self.upper_bound - self.lower_bound) / self.upper_bound
-                else:
-                    self.gap = float('inf')
+            if self.extended and not self.decomposition:
+                # For extended formulations without decomposition, solve an exact SOCP to get the feasible solution
+                ub_obj_val, ub_arcs, ub_points = self.compute_upper_bound(x_sol)
+                self.upper_bound = ub_obj_val
+                self.arcs = ub_arcs
+                self.points = ub_points
             else:
-                self.upper_bound = float('inf')
+                # For all other formulations the model objective is the true UB.
+                self.upper_bound = self.model.ObjVal
+                self._extract_arcs_and_points()
+
+                if self.decomposition and not self.extended:
+                    # For non-extended decompositions, extract points for plotting without overriding the upper bound.
+                    _, _, plot_points = self.compute_upper_bound(x_sol)
+                    if plot_points:
+                        self.points = plot_points
+
+            # Recalculate gap robustly
+            if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
+                self.gap = (self.upper_bound - self.lower_bound) / self.upper_bound
+            else:
                 self.gap = float('inf')
         else:
-            print(f"Optimization ended with status: {self.model.status}")
+            self.upper_bound = float('inf')
+            self.gap = float('inf')
 
     def _extract_arcs_and_points(self):
         """
