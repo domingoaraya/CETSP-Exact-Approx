@@ -181,16 +181,43 @@ class CETSP_L2_Solver:
                 if depot_start:
                     self.p_x[0].LB = self.p_x[0].UB = self.data.centers[0][0]
                     self.p_y[0].LB = self.p_y[0].UB = self.data.centers[0][1]
-                self.model.addConstrs(((self.p_x[k] - quicksum(self.x[i, k] * self.data.centers[i][0] for i in range(self.n)))**2 +
-                                      (self.p_y[k] - quicksum(self.x[i, k] * self.data.centers[i][1] for i in range(self.n)))**2 <=
-                                      quicksum(self.x[i, k] * self.data.radii[i] for i in range(self.n))**2
-                                      for k in positions), name="neighborhood")
+                # Written as ||q_k|| <= rho_k with q_k and rho_k defined by linear
+                # equalities. Expanding ||p_k - sum_i x_ik c_i||^2 <= (sum_i x_ik r_i)^2
+                # directly produces bilinear terms p_k*x_ik and x_ik*x_lk, which
+                # Gurobi does not recognise as a second-order cone: it treats the
+                # constraint as non-convex and resorts to spatial branching (SOS
+                # constraints, extra binaries), which is both slower and
+                # numerically fragile.
+                self.q_seq = self.model.addVars(positions, 2, lb=-GRB.INFINITY, name="q_nbhd")
+                self.rho_seq = self.model.addVars(positions, lb=0.0, name="rho_nbhd")
+                self.model.addConstrs((self.q_seq[k, 0] == self.p_x[k] - quicksum(self.x[i, k] * self.data.centers[i][0] for i in range(self.n))
+                                       for k in positions), name="q_nbhd_x")
+                self.model.addConstrs((self.q_seq[k, 1] == self.p_y[k] - quicksum(self.x[i, k] * self.data.centers[i][1] for i in range(self.n))
+                                       for k in positions), name="q_nbhd_y")
+                self.model.addConstrs((self.rho_seq[k] == quicksum(self.x[i, k] * self.data.radii[i] for i in range(self.n))
+                                       for k in positions), name="rho_nbhd")
+                self.model.addConstrs((self.q_seq[k, 0]**2 + self.q_seq[k, 1]**2 <= self.rho_seq[k]**2
+                                       for k in positions), name="neighborhood")
             elif self.model_type == 'perspective':
                 # A zero-radius target (the depot) turns its cone into
                 # ||p - x c|| <= 0, an empty-interior constraint with no strictly
                 # feasible point for the barrier. Those points can be fixed
-                self.model.addConstrs(((self.p_i[i, j, 0] - self.x[i, j] * self.data.centers[i][0])**2 + (self.p_i[i, j, 1] - self.x[i, j] * self.data.centers[i][1])**2 <= (self.data.radii[i] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[i] > 0.0), name="neighborhood_p_i_perspective")
-                self.model.addConstrs(((self.p_j[i, j, 0] - self.x[i, j] * self.data.centers[j][0])**2 + (self.p_j[i, j, 1] - self.x[i, j] * self.data.centers[j][1])**2 <= (self.data.radii[j] * self.x[i, j])**2 for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[j] > 0.0), name="neighborhood_p_j_perspective")
+                # Same reformulation as in the sequence model: the perspective cone
+                # ||p - x c|| <= r x is stated on q = p - x c (linear equality) so that
+                # the quadratic constraint ||q||^2 <= (r x)^2 has no bilinear p*x
+                # terms and Gurobi handles it as a second-order cone.
+                arcs_i = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[i] > 0.0]
+                arcs_j = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[j] > 0.0]
+                self.q_i = self.model.addVars(arcs_i, 2, lb=-GRB.INFINITY, name="q_i")
+                self.q_j = self.model.addVars(arcs_j, 2, lb=-GRB.INFINITY, name="q_j")
+                self.model.addConstrs((self.q_i[i, j, dim] == self.p_i[i, j, dim] - self.x[i, j] * self.data.centers[i][dim]
+                                       for (i, j) in arcs_i for dim in range(2)), name="q_i_def")
+                self.model.addConstrs((self.q_j[i, j, dim] == self.p_j[i, j, dim] - self.x[i, j] * self.data.centers[j][dim]
+                                       for (i, j) in arcs_j for dim in range(2)), name="q_j_def")
+                self.model.addConstrs((self.q_i[i, j, 0]**2 + self.q_i[i, j, 1]**2 <= (self.data.radii[i] * self.x[i, j])**2
+                                       for (i, j) in arcs_i), name="neighborhood_p_i_perspective")
+                self.model.addConstrs((self.q_j[i, j, 0]**2 + self.q_j[i, j, 1]**2 <= (self.data.radii[j] * self.x[i, j])**2
+                                       for (i, j) in arcs_j), name="neighborhood_p_j_perspective")
                 
                 self.model.addConstrs((self.p_i[i, j, dim] == self.x[i, j] * self.data.centers[i][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[i] == 0.0), name="neighborhood_p_i_degenerate")
                 self.model.addConstrs((self.p_j[i, j, dim] == self.x[i, j] * self.data.centers[j][dim] for i in range(self.n) for j in range(self.n) for dim in range(2) if i != j and self.data.radii[j] == 0.0), name="neighborhood_p_j_degenerate")
