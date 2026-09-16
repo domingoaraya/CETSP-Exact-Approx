@@ -180,7 +180,7 @@ class CETSPModel:
 
             if refined_sub_obj is None:
                 self._record_subproblem_failure("optimize_bs refined subproblem")
-            elif refined_sub_obj > current_estimation + 1e-5:
+            elif refined_sub_obj > self.solver.theta.X + 1e-5:
                 lhs, rhs = self.solver._generate_bs_cut_expr(x_sol, refined_duals)
                 if lhs is not None:
                     self.model.addConstr(lhs >= rhs, name=f"refined_cut_iter_{iteration}")
