@@ -123,6 +123,9 @@ class CETSPModel:
         self.data.initialize_bs_cells()
         self.model.Params.LazyConstraints = 1
 
+        # Keep the best bound seen; an iteration that runs out of time reports a weaker one.
+        best_bound = -float('inf')
+
         for iteration in range(max_iterations):
             time_remaining = time_limit - (time.time() - start_time)
             if time_remaining <= 0:
@@ -133,6 +136,10 @@ class CETSPModel:
             self.model.optimize(self._unified_callback)
 
             self.status = self.model.status
+            try:
+                best_bound = max(best_bound, self.model.ObjBound)
+            except Exception:
+                pass
             if self.model.status == GRB.TIME_LIMIT or self.model.solCount == 0:
                 break
 
@@ -187,7 +194,13 @@ class CETSPModel:
                     self.cuts += 1
 
         self.runtime = time.time() - start_time
-        self.lower_bound = self.model.ObjBound
+        if best_bound > -float('inf'):
+            self.lower_bound = best_bound
+        else:
+            try:
+                self.lower_bound = self.model.ObjBound
+            except Exception:
+                self.lower_bound = 0.0
         self.node_count = self.model.NodeCount
 
         if self.model.solCount > 0:
