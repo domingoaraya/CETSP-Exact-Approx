@@ -88,10 +88,13 @@ class ResultsWriter:
 
 
 def solve_instance(instance_path, model_type, time_limit, extended, decomposition, nu,
-                   cut_type, strengthen, optimize_coefficients, threads):
+                   cut_type, strengthen, optimize_coefficients, threads, gurobi_log=None):
     """
     Solves a single instance and returns a dict with the metric columns
     (everything in RESULT_COLUMNS except the identifying key).
+
+    If gurobi_log is given, the solver's log for this instance is written to
+    that file (console output stays off).
     """
     cetsp_data = CETSPData.from_file(instance_path)
 
@@ -107,6 +110,11 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
         threads=threads
     )
     model.build()
+    if gurobi_log:
+        # build() turns all solver output off; re-enable it into a file only.
+        model.model.Params.OutputFlag = 1
+        model.model.Params.LogToConsole = 0
+        model.model.Params.LogFile = gurobi_log
     model.optimize(time_limit)
 
     summary = model.get_solution_summary()
@@ -150,7 +158,7 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
 def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
              completed, time_limit=600, extended=False, decomposition=False, nu=None,
              cut_type=None, verbosity='high', strengthen=False,
-             optimize_coefficients=False, threads=0):
+             optimize_coefficients=False, threads=0, gurobi_log_dir=None):
     """
     Runs a test for a given configuration on a set of instances.
 
@@ -195,9 +203,15 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
     for i in pending:
         instance_path = os.path.join(folder, f"instance_{i}.txt")
 
+        gurobi_log = None
+        if gurobi_log_dir:
+            os.makedirs(gurobi_log_dir, exist_ok=True)
+            gurobi_log = os.path.join(
+                gurobi_log_dir, f"{formulation_name}__{n}_{r_min}_{r_max}__inst{i}.log")
+
         metrics = solve_instance(
             instance_path, model_type, time_limit, extended, decomposition, nu,
-            cut_type, strengthen, optimize_coefficients, threads
+            cut_type, strengthen, optimize_coefficients, threads, gurobi_log
         )
 
         row = {
@@ -237,6 +251,10 @@ if __name__ == "__main__":
     parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
     parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
+    parser.add_argument("--gurobi_log_dir", type=str, default=None,
+                        help="If set, write one Gurobi log file per instance into this directory "
+                             "(console output stays off). Useful for post-mortem of crashes or "
+                             "numerical trouble.")
     parser.add_argument("--outfile", type=str, default="Results/experiment_results.csv",
                         help="CSV file where results are appended as each instance finishes. "
                              "If the file already exists, runs already recorded in it are skipped, "
@@ -369,7 +387,8 @@ if __name__ == "__main__":
                             verbosity=args.verbosity,
                             strengthen=config['strengthen'],
                             optimize_coefficients=config['optimize_coefficients'],
-                            threads=args.threads
+                            threads=args.threads,
+                            gurobi_log_dir=args.gurobi_log_dir
                         )
 
             if args.verbosity == 'low':
