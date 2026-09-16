@@ -150,7 +150,7 @@ class CETSPData:
                 continue
 
             if hull is None:
-                start_angle, end_angle = 0.0, 2 * np.pi
+                arcs = [(0.0, 2 * np.pi)]
             else:
                 hull_indices = list(hull.vertices)
                 hull_vertices = [coords[j] for j in hull_indices]
@@ -200,26 +200,29 @@ class CETSPData:
                         valid_arcs.append((a1, a2))
 
                 if len(valid_arcs) == 0:
-                    start_angle, end_angle = 0.0, 2 * np.pi
-                elif len(valid_arcs) == 1:
-                    start_angle, end_angle = valid_arcs[0]
-                elif len(valid_arcs) == 2 and np.isclose(valid_arcs[0][0], 0.0) and np.isclose(valid_arcs[-1][1], 2 * np.pi):
-                    start_angle = valid_arcs[-1][0]
-                    end_angle = valid_arcs[0][1] + 2 * np.pi
+                    arcs = [(0.0, 2 * np.pi)]
                 else:
-                    largest_arc = max(valid_arcs, key=lambda x: x[1] - x[0])
-                    start_angle, end_angle = largest_arc
+                    # Keep every valid arc; the pair wrapping through 0 is one arc.
+                    arcs = list(valid_arcs)
+                    if (len(arcs) >= 2 and np.isclose(arcs[0][0], 0.0)
+                            and np.isclose(arcs[-1][1], 2 * np.pi)):
+                        first = arcs.pop(0)
+                        last = arcs.pop()
+                        arcs.append((last[0], first[1] + 2 * np.pi))
 
-            angle_step = (end_angle - start_angle) / N_prime
-            for cell_idx in range(N_prime):
-                a1 = start_angle + cell_idx * angle_step
-                a2 = start_angle + (cell_idx + 1) * angle_step
-                self.bs_cells[(i, cell_idx)] = {
-                    'center': self.centers[i],
-                    'radius': radius,
-                    'start_angle': a1,
-                    'end_angle': a2
-                }
+            cell_idx = 0
+            for start_angle, end_angle in arcs:
+                angle_step = (end_angle - start_angle) / N_prime
+                for step in range(N_prime):
+                    a1 = start_angle + step * angle_step
+                    a2 = start_angle + (step + 1) * angle_step
+                    self.bs_cells[(i, cell_idx)] = {
+                        'center': self.centers[i],
+                        'radius': radius,
+                        'start_angle': a1,
+                        'end_angle': a2
+                    }
+                    cell_idx += 1
 
         # Compute distances for all initial cells
         if self.bs_cells:
