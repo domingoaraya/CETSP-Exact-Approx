@@ -601,11 +601,7 @@ class CETSP_L2_Solver:
                     out_flow = quicksum(f_vars[(delta, sigma)] for _, j in out_arcs for sigma in cells_by_target[j] if (delta, sigma) in f_vars)
                     flow_c[delta] = sub_model.addConstr(in_flow - out_flow == 0, name=f"flow_cons_{delta}")
 
-            depot_out_arcs = [(i_arc, j) for (i_arc, j) in tour_arcs if i_arc == 0]
             depot_in_arcs = [(k, j_arc) for (k, j_arc) in tour_arcs if j_arc == 0]
-
-            source_flow = quicksum(f_vars[(delta, sigma)] for _, j in depot_out_arcs for delta in cells_by_target[0] for sigma in cells_by_target[j] if (delta, sigma) in f_vars)
-            sub_model.addConstr(source_flow == 1.0, name="source_flow")
 
             sink_flow = quicksum(f_vars[(delta, sigma)] for k, _ in depot_in_arcs for delta in cells_by_target[k] for sigma in cells_by_target[0] if (delta, sigma) in f_vars)
             sink_constr = sub_model.addConstr(sink_flow == 1.0, name="sink_flow")

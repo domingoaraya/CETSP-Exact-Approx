@@ -123,6 +123,9 @@ class CETSPModel:
         self.data.initialize_bs_cells()
         self.model.Params.LazyConstraints = 1
 
+        # Keep the best bound seen; an iteration that runs out of time reports a weaker one.
+        best_bound = -float('inf')
+
         for iteration in range(max_iterations):
             time_remaining = time_limit - (time.time() - start_time)
             if time_remaining <= 0:
@@ -133,6 +136,10 @@ class CETSPModel:
             self.model.optimize(self._unified_callback)
 
             self.status = self.model.status
+            try:
+                best_bound = max(best_bound, self.model.ObjBound)
+            except Exception:
+                pass
             if self.model.status == GRB.TIME_LIMIT or self.model.solCount == 0:
                 break
 
@@ -180,14 +187,20 @@ class CETSPModel:
 
             if refined_sub_obj is None:
                 self._record_subproblem_failure("optimize_bs refined subproblem")
-            elif refined_sub_obj > current_estimation + 1e-5:
+            elif refined_sub_obj > self.solver.theta.X + 1e-5:
                 lhs, rhs = self.solver._generate_bs_cut_expr(x_sol, refined_duals)
                 if lhs is not None:
                     self.model.addConstr(lhs >= rhs, name=f"refined_cut_iter_{iteration}")
                     self.cuts += 1
 
         self.runtime = time.time() - start_time
-        self.lower_bound = self.model.ObjBound
+        if best_bound > -float('inf'):
+            self.lower_bound = best_bound
+        else:
+            try:
+                self.lower_bound = self.model.ObjBound
+            except Exception:
+                self.lower_bound = 0.0
         self.node_count = self.model.NodeCount
 
         if self.model.solCount > 0:
