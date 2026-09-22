@@ -303,9 +303,14 @@ class CETSPData:
         if D > 0:
             theta_ij = np.arctan2(C_j[1] - C_i[1], C_j[0] - C_i[0])
             theta_ji = np.arctan2(C_i[1] - C_j[1], C_i[0] - C_j[0])
-            if self._is_angle_in_arc(theta_ij, cell1['start_angle'], cell1['end_angle']) and \
-               self._is_angle_in_arc(theta_ji, cell2['start_angle'], cell2['end_angle']):
-                min_dist = min(min_dist, abs(D - r_i - r_j))
+            # Either point may face the other centre or face away from it; the
+            # same-side pairs are the minimisers when one disc lies inside the other.
+            for s_i, s_j, val in ((0.0, 0.0, abs(D - r_i - r_j)),
+                                  (0.0, np.pi, abs(D - r_i + r_j)),
+                                  (np.pi, 0.0, abs(D + r_i - r_j))):
+                if self._is_angle_in_arc(theta_ij + s_i, cell1['start_angle'], cell1['end_angle']) and \
+                   self._is_angle_in_arc(theta_ji + s_j, cell2['start_angle'], cell2['end_angle']):
+                    min_dist = min(min_dist, val)
 
         # b) Endpoints to Opposing Arc
         ep1_i, ep2_i = self._get_endpoints(cell1)
