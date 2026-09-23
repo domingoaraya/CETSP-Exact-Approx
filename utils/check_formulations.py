@@ -121,7 +121,7 @@ CONFIGURATIONS = [
     ('PBF-A-D-DE',      'perspective', True,  True,  'dual+enumerative', False),
     ('PBF-A-D-dual-OC', 'perspective', True,  True,  'dual',             True),
     ('PBF-A-D-DE-OC',   'perspective', True,  True,  'dual+enumerative', True),
-    ('B&S',             'B&S',         False, False, None,               False),
+    ('BS',             'BS',         False, False, None,               False),
 ]
 
 STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
@@ -131,11 +131,11 @@ STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
 def is_bracketing(model_type, extended, decomposition):
     """
     Relaxations, which bracket the exact formulations rather than matching them
-    (see C6). Extended and non-decomposed, plus B&S, whose cell discretisation
+    (see C6). Extended and non-decomposed, plus BS, whose cell discretisation
     makes it inexact by construction: its bound is a relaxation and its tour is
     feasible but not necessarily optimal.
     """
-    return model_type == 'B&S' or (extended and not decomposition)
+    return model_type == 'BS' or (extended and not decomposition)
 
 
 def exact_tour_length(data, tour_arcs, mip_gap):

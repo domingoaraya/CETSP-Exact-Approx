@@ -15,7 +15,7 @@ This research implements and compares multiple approaches to solve the CETSP:
 - **MILP Formulations**: Approximations of the SOCP models using mixed-integer linear programming, derived from polyhedral approximations of the second-order cone.
 - **Decomposition Schemes**: Decomposition schemes are proposed for both SOCP and MILP formulations. The master problem determines the visit sequence, while the subproblem computes the optimal visit points within the disks.
     - **Cut coefficient optimization**: For the PBF dual cut, the coefficients of arcs outside the support of the incumbent are unconstrained by the subproblem. Minimizing over them yields a stronger cut at no cost to validity.
-- **Benchmark**: The discretization-based formulation of Behdani & Smith (2014) (`B&S`) is implemented for comparison. It is inexact by construction: its bound is a relaxation and its tour is feasible but not necessarily optimal.
+- **Benchmark**: The discretization-based formulation of Behdani & Smith (2014) (`BS`) is implemented for comparison. It is inexact by construction: its bound is a relaxation and its tour is feasible but not necessarily optimal.
 
 ## How to Run
 
@@ -36,7 +36,7 @@ Experiments can be customized using the following parameters:
 - `--n_nodes`: List of number of nodes (n) to test (default: 10 15 20).
 - `--r_mean`: List of mean radii (r) to test (default: 0.25 0.5 1).
 - `--sigma`: List of sigma values for radii variation (default: 0 0.2 0.5).
-- `--model_type`: List of model types to test. Choices: `arc`, `seq`, `perspective`, `B&S` (default: `arc` `seq` `perspective`).
+- `--model_type`: List of model types to test. Choices: `arc`, `seq`, `perspective`, `BS` (default: `arc` `seq` `perspective`).
 - `--decomposition`: Use decomposition. Choices: `True`, `False` (default: `False` `True`).
 - `--extended`: Use extended formulation. Choices: `True`, `False` (default: `False` `True`).
 - `--sbf_cut_type`: Cut type for sequence model decomposition. Choices: `dual`, `enumerative`, `dual+enumerative` (default: `enumerative` for SBF-A-D and `dual` for SBF-D).
@@ -47,7 +47,7 @@ Experiments can be customized using the following parameters:
 - `--verbosity`: Verbosity level for experiment output. Choices: `high`, `low` (default: `high`).
 - `--outfile`: CSV file where results are written (default: `Results/experiment_results.csv`). Each row is appended as soon as its instance finishes. If the file already exists, every `(Formulation, n, r_min, r_max, Instance)` combination already recorded in it is skipped.
 
-`B&S` ignores the decomposition, extended, cut type and strengthening switches, since it carries its own decomposition and cell refinement loop. It always yields a single configuration.
+`BS` ignores the decomposition, extended, cut type and strengthening switches, since it carries its own decomposition and cell refinement loop. It always yields a single configuration.
 
 ### Example
 To run a specific experiment with a time limit of 300 seconds on instances with 10 nodes, using only the arc-based model with decomposition:
@@ -64,7 +64,7 @@ Results are keyed by a label built from the configuration, e.g. `PBF-A-D-dual-OC
 
 | Element | Meaning |
 |---|---|
-| `ABF`, `SBF`, `PBF`, `B&S` | base formulation |
+| `ABF`, `SBF`, `PBF`, `BS` | base formulation |
 | `-A` | extended (polyhedral approximation of the cone) |
 | `-D` | Benders decomposition |
 | `-dual`, `-enum`, `-DE` | cut type: dual, enumerative, or both |
@@ -114,8 +114,8 @@ E&AF-CETSP/
 
 #### `classes/`
 - **`cut_coefficients.py`**: Minimizes the PBF dual cut coefficients on arcs outside the support of the incumbent, using a projected Weiszfeld iteration. Compiled with numba and warmed up at import.
-- **`data_handling.py`**: Contains the `CETSPData` class, which is used to store and manage the data for a given CETSP instance, including the cell discretization used by `B&S`.
-- **`models.py`**: Defines the `CETSPModel` class, which builds and encapsulates the Gurobi models for the different formulations (ABF, SBF, PBF, B&S and their variants), and drives the callbacks and refinement loop.
+- **`data_handling.py`**: Contains the `CETSPData` class, which is used to store and manage the data for a given CETSP instance, including the cell discretization used by `BS`.
+- **`models.py`**: Defines the `CETSPModel` class, which builds and encapsulates the Gurobi models for the different formulations (ABF, SBF, PBF, BS and their variants), and drives the callbacks and refinement loop.
 - **`plotting.py`**: Contains the `Plotter` class, which provides methods for visualizing CETSP instances and their solutions.
 - **`solver.py`**: Implements the solution procedures within the `CETSP_L2_Solver` class, including the decomposition schemes and cut generation logic.
 
@@ -137,7 +137,7 @@ E&AF-CETSP/
 -   **pandas**: For data manipulation and analysis.
 -   **numpy**: For numerical operations.
 -   **numba**: JIT compilation of the PBF cut coefficient kernel.
--   **scipy**: Convex hulls for the `B&S` cell discretization.
+-   **scipy**: Convex hulls for the `BS` cell discretization.
 -   **networkx**: Graph handling for DFJ cut separation.
 -   **matplotlib**: For plotting and data visualization.
 -   **tqdm**: For displaying progress bars during experiment execution.

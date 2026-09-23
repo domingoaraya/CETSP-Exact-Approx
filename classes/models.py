@@ -18,7 +18,7 @@ class CETSPModel:
 
         Args:
             data (CETSPData): The data for the CETSP instance.
-            model_type (str): The type of model to build ('arc', 'seq', 'perspective', or 'B&S').
+            model_type (str): The type of model to build ('arc', 'seq', 'perspective', or 'BS').
             decomposition (bool): Whether to use Benders decomposition. Defaults to False.
             extended (bool): Whether to use the extended formulation for the L2 norm. Defaults to False.
             nu (int, optional): The parameter for the extended formulation. Defaults to 3.
@@ -80,9 +80,9 @@ class CETSPModel:
 
         Args:
             time_limit (int, optional): The time limit for the solver in seconds. Defaults to 600.
-            max_iterations (int, optional): Maximum cell refinement iterations for B&S. Defaults to 5.
+            max_iterations (int, optional): Maximum cell refinement iterations for BS. Defaults to 5.
         """
-        if self.model_type == 'B&S':
+        if self.model_type == 'BS':
             self.optimize_bs(time_limit=time_limit, max_iterations=max_iterations)
             return
 
@@ -106,7 +106,7 @@ class CETSPModel:
 
     def optimize_bs(self, time_limit: int = 600, max_iterations: int = 5):
         """
-        Solves the CETSP using the Behdani & Smith (B&S) cell refinement outer loop.
+        Solves the CETSP using the Behdani & Smith (BS) cell refinement outer loop.
 
         Args:
             time_limit (int, optional): Total time limit in seconds. Defaults to 600.
@@ -278,12 +278,12 @@ class CETSPModel:
         Gurobi callback for lazy constraints (MIPSOL) and DFJ user cuts (MIPNODE).
         """
         if where == GRB.Callback.MIPSOL:
-            # Only run subproblem / Benders logic for decomposition or B&S models
-            if self.decomposition or self.model_type == 'B&S':
+            # Only run subproblem / Benders logic for decomposition or BS models
+            if self.decomposition or self.model_type == 'BS':
                 x_sol = model.cbGetSolution(self.solver.x)
 
-                # 1. Subtour Check FIRST for B&S model
-                if self.model_type == 'B&S':
+                # 1. Subtour Check FIRST for BS model
+                if self.model_type == 'BS':
                     subtours = self._find_subtours(x_sol)
                     if len(subtours) > 1:
                         for S in subtours:
@@ -314,7 +314,7 @@ class CETSPModel:
 
                 if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
                     self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
-                    if self.model_type == 'B&S':
+                    if self.model_type == 'BS':
                         self.cuts += 1
                     elif self.cut_type == 'dual' and self.model_type in ['seq', 'perspective']:
                         self.cuts += 1
@@ -395,7 +395,7 @@ class CETSPModel:
         """
         ub_model = Model("UB_Model")
         ub_model.setParam('OutputFlag', 0)
-        model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'B&S'] else 'seq')
+        model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'BS'] else 'seq')
         ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads)
         ub_solver.build()
 
@@ -510,7 +510,7 @@ class CETSPModel:
 
         x_sol = self.model.getAttr('X', self.solver.x)
 
-        if self.model_type in ['arc', 'B&S']:
+        if self.model_type in ['arc', 'BS']:
             for i in range(self.data.n):
                 for j in range(self.data.n):
                     if x_sol[i, j] > 0.5:
@@ -538,7 +538,7 @@ class CETSPModel:
         if hasattr(self.solver, 'p_x') and hasattr(self.solver, 'p_y'):
             p_x_sol = self.model.getAttr('X', self.solver.p_x)
             p_y_sol = self.model.getAttr('X', self.solver.p_y)
-            if self.model_type in ['arc', 'B&S']:
+            if self.model_type in ['arc', 'BS']:
                 for i in range(self.data.n):
                     self.points[i] = (p_x_sol[i], p_y_sol[i])
             elif self.model_type == 'seq':

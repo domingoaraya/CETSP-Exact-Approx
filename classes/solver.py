@@ -58,7 +58,7 @@ class CETSP_L2_Solver:
             # Avoid numerical issues in arc-based SOCPs
             self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
 
-        if self.model_type == "B&S":
+        if self.model_type == "BS":
             self._build_bs_master_model()
         elif self.decomposition:
             self._build_decomposition_model()
@@ -97,7 +97,7 @@ class CETSP_L2_Solver:
 
     def _build_bs_master_model(self):
         """
-        Builds the master problem for the Behdani & Smith (B&S) formulation.
+        Builds the master problem for the Behdani & Smith (BS) formulation.
         """
         self._create_variables()
         self._create_degree_constraints()
@@ -110,7 +110,7 @@ class CETSP_L2_Solver:
         # Binary variables indicating the sequence of visited regions
         self.x = self.model.addVars(self.n, self.n, vtype=GRB.BINARY, name="x")
 
-        if self.model_type == "B&S":
+        if self.model_type == "BS":
             self.theta = self.model.addVar(vtype=GRB.CONTINUOUS, name="theta", lb=0)
             return
 
@@ -160,8 +160,8 @@ class CETSP_L2_Solver:
         self.model.addConstrs((self.x.sum(i, '*') == 1 for i in range(self.n)), name="visit_once")
         # Each position in the tour must be occupied by exactly one region
         self.model.addConstrs((self.x.sum('*', j) == 1 for j in range(self.n)), name="occupy_once")
-        # No self-loops for arc-based, B&S, and perspective formulations
-        if self.model_type in ['arc', 'B&S', 'perspective']:
+        # No self-loops for arc-based, BS, and perspective formulations
+        if self.model_type in ['arc', 'BS', 'perspective']:
             self.model.addConstrs((self.x[i, i] == 0 for i in range(self.n)), name="no_self_loops")
         
     def _create_neighborhood_constraints(self):
@@ -566,7 +566,7 @@ class CETSP_L2_Solver:
             else:
                 return None, None
 
-        elif self.model_type == 'B&S':
+        elif self.model_type == 'BS':
             sub_model = Model("bs_subproblem")
             sub_model.setParam('OutputFlag', 0)
             sub_model.setParam('Threads', self.threads)
@@ -740,14 +740,14 @@ class CETSP_L2_Solver:
                 self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
                 self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
 
-        elif self.model_type == 'B&S':
+        elif self.model_type == 'BS':
             lhs, rhs = self._generate_bs_cut_expr(x_sol, duals)
             if lhs is not None:
                 self.model.cbLazy(lhs >= rhs)
 
     def _generate_bs_cut_expr(self, x_sol, duals):
         """
-        Generates the linear expression (LHS) and bound (RHS) for a Behdani & Smith (B&S) cut.
+        Generates the linear expression (LHS) and bound (RHS) for a Behdani & Smith (BS) cut.
         Does not interact directly with the Gurobi model or callbacks.
 
         Args:
@@ -880,7 +880,7 @@ class CETSP_L2_Solver:
         """
         Sets the objective function for the model.
         """
-        if self.model_type == 'B&S':
+        if self.model_type == 'BS':
             self._compute_distance_estimations()
             self.model.setObjective(quicksum(self.x[i,j]*self.estimation[i,j] for i in range(self.n) for j in range(self.n)) + self.theta, GRB.MINIMIZE)
             return
