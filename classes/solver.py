@@ -680,8 +680,8 @@ class CETSP_L2_Solver:
                     else:
                         delta_rev += (1 - self.x[i,k])
                 
-                self.model.cbLazy(-(sub_obj/4)*delta + sub_obj <= self.theta)
-                self.model.cbLazy(-(sub_obj/4)*delta_rev + sub_obj <= self.theta)
+                self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
+                self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
 
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
