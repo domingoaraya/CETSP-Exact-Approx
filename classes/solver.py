@@ -127,11 +127,13 @@ class CETSP_L2_Solver:
                     self._apply_arc_point_bounds(self.p_x, self.p_y)
 
             if self.model_type == "arc":
-                # CONTINUOUS variables for the distance between points
+                # CONTINUOUS variables for the (activated) distance of each arc:
+                # d_ij = ||p_i - p_j|| if the tour uses (i, j), 0 otherwise. The
+                # big-M activation is folded into the distance constraint itself
+                # (see _create_distance_constraints), so no separate auxiliary
+                # variable is needed.
                 if not (self.decomposition and not self.extended):
                     self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
-                # Auxiliary variables for the linearized objective function
-                self.d_aux = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d_aux")
             elif self.model_type == "seq":
                 # CONTINUOUS variables for the distance between points
                 if not (self.decomposition and not self.extended):
@@ -231,7 +233,16 @@ class CETSP_L2_Solver:
         """
         if not self.extended:
             if self.model_type == 'arc':
-                self.model.addConstrs((self.d[i,j]**2 >= (self.p_x[i] - self.p_x[j])**2 + (self.p_y[i] - self.p_y[j])**2 for i in range(self.n) for j in range(self.n)), name="distance")
+                # ||p_i - p_j|| <= d_ij + M_ij (1 - x_ij): the cone and the big-M
+                # activation as a single constraint. Written on the auxiliary
+                # t_ij = d_ij + M_ij (1 - x_ij) (linear equality) so that the
+                # quadratic constraint ||p_i - p_j||^2 <= t_ij^2 has no products
+                # d_ij * x_ij and Gurobi handles it as a second-order cone.
+                M = self._compute_big_m()
+                self.t_arc = self.model.addVars(self.n, self.n, lb=0.0, name="t_dist")
+                self.model.addConstrs((self.t_arc[i, j] == self.d[i, j] + M[i, j] * (1 - self.x[i, j])
+                                       for i in range(self.n) for j in range(self.n)), name="t_dist_def")
+                self.model.addConstrs((self.t_arc[i,j]**2 >= (self.p_x[i] - self.p_x[j])**2 + (self.p_y[i] - self.p_y[j])**2 for i in range(self.n) for j in range(self.n)), name="distance")
             elif self.model_type == 'seq':
                 self.model.addConstrs((self.d[k]**2 >= (self.p_x[k] - self.p_x[k+1])**2 + (self.p_y[k] - self.p_y[k+1])**2 for k in range(self.n - 1)), name="distance")
                 self.model.addConstr((self.d[self.n - 1]**2 >= (self.p_x[self.n - 1] - self.p_x[0])**2 + (self.p_y[self.n - 1] - self.p_y[0])**2), name="distance_wrap_around")
@@ -326,7 +337,11 @@ class CETSP_L2_Solver:
                 self.model.addConstrs(eta_d[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
                 self.model.addConstrs(eta_d[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
 
-                self.model.addConstrs(xi_d [i,j,self.nu] <= self.d[i,j] for i in range(self.n) for j in range(self.n))
+                # (p_i - p_j, d_ij + M_ij (1 - x_ij)) in P_eps(nu): the big-M
+                # activation enters the last inequality of the approximation
+                # directly, which is linear, so no auxiliary variable is needed.
+                M = self._compute_big_m()
+                self.model.addConstrs(xi_d [i,j,self.nu] <= self.d[i,j] + M[i,j] * (1 - self.x[i,j]) for i in range(self.n) for j in range(self.n))
                 self.model.addConstrs(eta_d[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[i,j,self.nu] for i in range(self.n) for j in range(self.n))
 
             elif self.model_type == 'seq':
@@ -808,8 +823,7 @@ class CETSP_L2_Solver:
         """
         self._create_subtour_elimination_constraints()
         self._create_neighborhood_constraints()
-        self._create_distance_constraints()
-        self._create_big_m_constraints()
+        self._create_distance_constraints()   # includes the big-M activation
 
     def _create_seq_formulation_specific_parts(self):
         """
@@ -842,13 +856,6 @@ class CETSP_L2_Solver:
         self.model.addConstrs((u.sum(i, '*') - u.sum('*', i) == -1 for i in range(1, self.n)), name="subtour_elim_flow")
         self.model.addConstr((u.sum(0, '*') - u.sum('*', 0) == self.n - 1), name="subtour_elim_source")
         self.model.addConstrs((u[i, j] <= (self.n - 1) * self.x[i, j] for i in range(self.n) for j in range(self.n)), name="subtour_elim_capacity")
-
-    def _create_big_m_constraints(self):
-        """
-        Creates the Big-M constraints to linearize the objective function.
-        """
-        M = self._compute_big_m()
-        self.model.addConstrs((self.d[i,j] - M[i,j]*(1 - self.x[i,j]) <= self.d_aux[i,j] for i in range(self.n) for j in range(self.n)), name="big_m")
 
     def _compute_big_m(self):
         """
@@ -886,12 +893,7 @@ class CETSP_L2_Solver:
             return
 
         if not self.decomposition:
-            if self.model_type == 'arc':
-                self.model.setObjective(self.d_aux.sum(), GRB.MINIMIZE)
-            elif self.model_type == 'seq':
-                self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
-            elif self.model_type == 'perspective':
-                self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
+            self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
         else:
             if not self.extended:
                 if self.model_type in ['arc', 'perspective']:
@@ -900,8 +902,5 @@ class CETSP_L2_Solver:
                 elif self.model_type == 'seq':
                     self.model.setObjective(self.theta, GRB.MINIMIZE)
             else:
-                if self.model_type == 'arc':
-                    self.model.setObjective(self.d_aux.sum() + self.theta, GRB.MINIMIZE)
-                elif self.model_type in ['seq', 'perspective']:
-                    self.model.setObjective(self.d.sum() + self.theta, GRB.MINIMIZE)
+                self.model.setObjective(self.d.sum() + self.theta, GRB.MINIMIZE)
 
