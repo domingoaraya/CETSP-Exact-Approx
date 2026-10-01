@@ -129,6 +129,23 @@ def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
         else:
             gx = wx
             gy = wy
+
+    # Never return a point worse than the anchors themselves. Besides being a
+    # cheap safeguard for the fixed iteration budget, this is what makes the
+    # cut tight on all reorderings of a straight pass-through cluster: there
+    # eta_i = eta_j = u up to solver noise, and h(u) is exactly the value that
+    # telescopes along any order of the cluster (see the tightness proposition).
+    # The anchors are projected onto the ball first: optimal etas lie in it, but
+    # solver output can exceed norm 1 by rounding.
+    hg = _h(gx, gy, cx, cy, r1, r2, e1x, e1y, e2x, e2y)
+    s1 = 1.0 / max(1.0, sqrt(e1x * e1x + e1y * e1y))
+    h1 = _h(e1x * s1, e1y * s1, cx, cy, r1, r2, e1x, e1y, e2x, e2y)
+    if h1 < hg:
+        gx, gy, hg = e1x * s1, e1y * s1, h1
+    s2 = 1.0 / max(1.0, sqrt(e2x * e2x + e2y * e2y))
+    h2 = _h(e2x * s2, e2y * s2, cx, cy, r1, r2, e1x, e1y, e2x, e2y)
+    if h2 < hg:
+        gx, gy, hg = e2x * s2, e2y * s2, h2
     return gx, gy
 
 
