@@ -18,7 +18,7 @@ class CETSP_L2_Solver:
     """
 
     def __init__(self, model, data, model_type, decomposition=False, extended=False, nu=None,
-                 optimize_coefficients=False, threads=0):
+                 optimize_coefficients=False, threads=0, symmetry_breaking=True):
         """
         Initializes the CETSP_L2_Solver.
 
@@ -34,6 +34,10 @@ class CETSP_L2_Solver:
                 trivial gamma = 0 completion.
             threads (int): Gurobi Threads for every model built here. 0 lets
                 Gurobi choose.
+            symmetry_breaking (bool): Fix the orientation of the tour (depot's
+                successor has a smaller label than its predecessor). Valid for
+                any model solved from scratch; must be False for models whose
+                integer variables are fixed to a given tour (upper-bound SOCP).
         """
         self.model = model
         self.data = data
@@ -44,6 +48,7 @@ class CETSP_L2_Solver:
         self.n = data.n
         self.threads = threads
         self.optimize_coefficients = optimize_coefficients and model_type == 'perspective'
+        self.symmetry_breaking = symmetry_breaking
         # Gurobi status of the last subproblem that did not solve to optimality
         self.last_subproblem_status = None
         if self.optimize_coefficients:
@@ -80,6 +85,44 @@ class CETSP_L2_Solver:
                 raise ValueError("Invalid model type specified.")
 
             self._set_objective()
+
+        if self.symmetry_breaking:
+            self._create_symmetry_breaking_constraints()
+
+    def _create_symmetry_breaking_constraints(self):
+        """
+        Removes the reversal symmetry: every tour and its reverse have the same
+        length, and exactly one of the two has the depot's successor labelled
+        lower than its predecessor (n >= 3). Restricting to those tours leaves
+        the optimal value unchanged and halves the integer solutions.
+
+        Arc-based models (arc, perspective, BS): next(0) < prev(0), i.e.
+            sum_j j x_{0j} + 1 <= sum_i i x_{i0}.
+        Sequence model (seq): the successor is the node at position 1 and the
+        predecessor the node at position n-1, so
+            sum_i i z_{i,1} + 1 <= sum_i i z_{i,n-1}.
+        The implied fixings (the highest-labelled node is never the successor,
+        node 1 is never the predecessor) are imposed as bounds.
+
+        Not applied to models whose x is fixed to a given tour (compute_upper_bound,
+        check_formulations), where the tour may have the other orientation.
+        """
+        n = self.n
+        if n < 3:
+            return
+        if self.model_type == 'seq':
+            succ = [self.x[i, 1] for i in range(1, n)]
+            pred = [self.x[i, n - 1] for i in range(1, n)]
+            self.x[n - 1, 1].ub = 0.0
+            self.x[1, n - 1].ub = 0.0
+        else:
+            succ = [self.x[0, i] for i in range(1, n)]
+            pred = [self.x[i, 0] for i in range(1, n)]
+            self.x[0, n - 1].ub = 0.0
+            self.x[1, 0].ub = 0.0
+        self.model.addConstr(
+            quicksum(i * succ[i - 1] for i in range(1, n)) + 1 <= quicksum(i * pred[i - 1] for i in range(1, n)),
+            name="orientation")
 
     def _prepare_dual_cut_buffers(self):
         """

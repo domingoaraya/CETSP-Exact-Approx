@@ -88,7 +88,8 @@ class ResultsWriter:
 
 
 def solve_instance(instance_path, model_type, time_limit, extended, decomposition, nu,
-                   cut_type, strengthen, optimize_coefficients, threads, gurobi_log=None):
+                   cut_type, strengthen, optimize_coefficients, threads, gurobi_log=None,
+                   symmetry_breaking=True):
     """
     Solves a single instance and returns a dict with the metric columns
     (everything in RESULT_COLUMNS except the identifying key).
@@ -107,6 +108,7 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
         cut_type=cut_type,
         strengthen=strengthen,
         optimize_coefficients=optimize_coefficients,
+        symmetry_breaking=symmetry_breaking,
         threads=threads
     )
     model.build()
@@ -164,7 +166,8 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
 def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
              completed, time_limit=600, extended=False, decomposition=False, nu=None,
              cut_type=None, verbosity='high', strengthen=False,
-             optimize_coefficients=False, threads=0, gurobi_log_dir=None):
+             optimize_coefficients=False, threads=0, gurobi_log_dir=None,
+             symmetry_breaking=True):
     """
     Runs a test for a given configuration on a set of instances.
 
@@ -217,7 +220,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
 
         metrics = solve_instance(
             instance_path, model_type, time_limit, extended, decomposition, nu,
-            cut_type, strengthen, optimize_coefficients, threads, gurobi_log
+            cut_type, strengthen, optimize_coefficients, threads, gurobi_log,
+            symmetry_breaking
         )
 
         row = {
@@ -257,6 +261,10 @@ if __name__ == "__main__":
     parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
     parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
+    parser.add_argument("--symmetry_breaking", type=str, default='True', choices=['False', 'True'],
+                        help="Fix the orientation of the tour in every model solved from scratch "
+                             "(depot's successor labelled lower than its predecessor). Default True; "
+                             "does not change the configuration label.")
     parser.add_argument("--gurobi_log_dir", type=str, default=None,
                         help="If set, write one Gurobi log file per instance into this directory "
                              "(console output stays off). Useful for post-mortem of crashes or "
@@ -394,7 +402,8 @@ if __name__ == "__main__":
                             strengthen=config['strengthen'],
                             optimize_coefficients=config['optimize_coefficients'],
                             threads=args.threads,
-                            gurobi_log_dir=args.gurobi_log_dir
+                            gurobi_log_dir=args.gurobi_log_dir,
+                            symmetry_breaking=(args.symmetry_breaking == 'True')
                         )
 
             if args.verbosity == 'low':

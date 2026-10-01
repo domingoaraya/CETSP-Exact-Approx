@@ -15,7 +15,7 @@ class CETSPModel:
     """
 
     def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False,
-                 optimize_coefficients: bool = False, threads: int = 0):
+                 optimize_coefficients: bool = False, threads: int = 0, symmetry_breaking: bool = True):
         """
         Initializes the CETSPModel.
 
@@ -38,6 +38,7 @@ class CETSPModel:
         self.cut_type = cut_type if cut_type is not None else 'enumerative'
         self.strengthen = strengthen
         self.optimize_coefficients = optimize_coefficients
+        self.symmetry_breaking = symmetry_breaking
         self.threads = threads
         self.model = Model("CETSP")
         self.solver = None
@@ -64,7 +65,7 @@ class CETSPModel:
         """
         self.data.eliminate_redundancies()
         self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu, self.optimize_coefficients,
-                                      threads=self.threads)
+                                      threads=self.threads, symmetry_breaking=self.symmetry_breaking)
         self.solver.build()
 
         # Initialize NetworkX graph for DFJ separation
@@ -414,7 +415,9 @@ class CETSPModel:
         ub_model = Model("UB_Model")
         ub_model.setParam('OutputFlag', 0)
         model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'BS'] else 'seq')
-        ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads)
+        # x is fixed to the incumbent tour, which may have either orientation:
+        # no symmetry breaking here.
+        ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads, symmetry_breaking=False)
         ub_solver.build()
 
         # Fix integer variables

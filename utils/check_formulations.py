@@ -150,7 +150,7 @@ def exact_tour_length(data, tour_arcs, mip_gap):
     m = Model()
     m.setParam('OutputFlag', 0)
     m.setParam('MIPGap', mip_gap)
-    s = CETSP_L2_Solver(m, data, 'arc')
+    s = CETSP_L2_Solver(m, data, 'arc', symmetry_breaking=False)   # the tour is given; either orientation
     s.cut_type = None
     s.build()
     active = set(tour_arcs)
