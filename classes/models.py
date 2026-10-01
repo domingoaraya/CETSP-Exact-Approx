@@ -7,6 +7,8 @@ from classes.data_handling import CETSPData
 from classes.solver import CETSP_L2_Solver
 
 class CETSPModel:
+    # Number of subproblem failures reported per instance before going quiet
+    SUBPROBLEM_WARNINGS = 3
     """
     A class to represent and solve a Close Enough Traveling Salesperson Problem (CETSP).
     This class orchestrates the data handling, model building, and optimization process.
@@ -50,11 +52,11 @@ class CETSPModel:
         self.cuts = 0
         self.dfj_cuts = 0
         self.status = None
+        self.unverified_incumbent = False
         self.bs_history = []
         self.G = None
 
         self.subproblem_failures = 0
-        self._sub_failure_warned = False
 
     def build(self):
         """
@@ -269,14 +271,16 @@ class CETSPModel:
         model instance) console warning.
         """
         self.subproblem_failures += 1
-        if not self._sub_failure_warned:
+        status = getattr(self.solver, 'last_subproblem_status', None)
+        if self.subproblem_failures <= self.SUBPROBLEM_WARNINGS:
             print(
-                f"[CETSP] subproblem failed to solve to the required status "
-                f"({context}, model_type={self.model_type}). "
-                f"Further occurrences this run are counted but not printed.",
+                f"[CETSP] subproblem failed to solve to optimality "
+                f"({context}, model_type={self.model_type}, gurobi_status={status}, "
+                f"failure #{self.subproblem_failures}). "
+                + ("Further occurrences this run are counted but not printed."
+                   if self.subproblem_failures == self.SUBPROBLEM_WARNINGS else ""),
                 file=sys.stderr, flush=True,
             )
-            self._sub_failure_warned = True
 
 
     def _unified_callback(self, model, where):
@@ -308,8 +312,15 @@ class CETSPModel:
                 sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation, d_sol)
 
                 if sub_obj is None:
-                    self._record_subproblem_failure("MIPSOL callback")
+                    # No usable information: the solution stays unverified. The
+                    # final upper bound is recomputed from the tour itself in
+                    # _retrieve_solution, so this cannot corrupt the reported UB.
+                    self._record_subproblem_failure("MIPSOL callback, no cut generated")
                     return
+                if isinstance(duals, dict) and duals.get('partial'):
+                    # Lower bound on Q from a suboptimal primal: valid cut, weaker.
+                    self._record_subproblem_failure("MIPSOL callback, cut from ObjBound")
+                    duals = {}
 
                 # Dual cuts on extended formulations can lead to subproblem taking
                 # negative value due to their involvement of the distance variables.
@@ -414,7 +425,10 @@ class CETSPModel:
         
         ub_model.optimize()
 
-        if ub_model.status == GRB.OPTIMAL:
+        # Any feasible point of the fixed-sequence problem is a valid upper bound;
+        # SUBOPTIMAL (with a solution) is therefore acceptable, only the exactness
+        # of the tour length is lost.
+        if ub_model.status == GRB.OPTIMAL or (ub_model.status == GRB.SUBOPTIMAL and ub_model.SolCount > 0):
             # Extract arcs and points from the upper bound model
             arcs = []
             points = {}
@@ -485,16 +499,28 @@ class CETSPModel:
                 self.upper_bound = ub_obj_val
                 self.arcs = ub_arcs
                 self.points = ub_points
-            else:
-                # For all other formulations the model objective is the true UB.
+            elif self.decomposition:
+                # The master objective equals the tour length only if every
+                # incumbent was verified by the subproblem. A subproblem that
+                # failed lets an unverified incumbent through, so the reported UB
+                # is always the length of the tour recomputed by the exact SOCP.
                 self.upper_bound = self.model.ObjVal
                 self._extract_arcs_and_points()
-
-                if self.decomposition and not self.extended:
-                    # For non-extended decompositions, extract points for plotting without overriding the upper bound.
-                    _, _, plot_points = self.compute_upper_bound(x_sol)
-                    if plot_points:
-                        self.points = plot_points
+                ub_true, _, plot_points = self.compute_upper_bound(x_sol)
+                if plot_points:
+                    self.points = plot_points
+                if ub_true != float('inf'):
+                    if ub_true > self.upper_bound + 1e-6 * max(1.0, abs(ub_true)):
+                        self.unverified_incumbent = True
+                        print(f"[CETSP] master objective {self.upper_bound:.9g} is below the true "
+                              f"length {ub_true:.9g} of the incumbent tour (a subproblem failure "
+                              f"let it through); reporting the true length.",
+                              file=sys.stderr, flush=True)
+                    self.upper_bound = max(self.upper_bound, ub_true)
+            else:
+                # Monolithic SOCP models: the model objective is the true UB.
+                self.upper_bound = self.model.ObjVal
+                self._extract_arcs_and_points()
 
             # Recalculate gap robustly
             if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
@@ -568,6 +594,7 @@ class CETSPModel:
                 "status": self.status,
                 "cuts_added": self.cuts,
                 "dfj_cuts": self.dfj_cuts,
+                "unverified_incumbent": self.unverified_incumbent,
                 "subproblem_failures": self.subproblem_failures,
                 "arcs": self.arcs,
                 "points": self.points

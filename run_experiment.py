@@ -120,7 +120,13 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
     summary = model.get_solution_summary()
 
     if isinstance(summary, dict):
-        if model.model.Status == GRB.OPTIMAL:
+        gap = summary.get('gap', float('inf'))
+        if model.model.Status == GRB.OPTIMAL and not (gap <= 1e-4):
+            # Gurobi closed the master, but the verified upper bound (recomputed
+            # from the incumbent tour) does not match the bound: some incumbent
+            # went through unverified. Do not report it as solved.
+            status = "Optimal_Unverified"
+        elif model.model.Status == GRB.OPTIMAL:
             status = "Optimal"
         elif model.model.Status == GRB.SUBOPTIMAL:
             status = "Suboptimal"

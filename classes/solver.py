@@ -44,6 +44,8 @@ class CETSP_L2_Solver:
         self.n = data.n
         self.threads = threads
         self.optimize_coefficients = optimize_coefficients and model_type == 'perspective'
+        # Gurobi status of the last subproblem that did not solve to optimality
+        self.last_subproblem_status = None
         if self.optimize_coefficients:
             self._centers, self._radii = pack_instance(data)
 
@@ -468,11 +470,21 @@ class CETSP_L2_Solver:
                 sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
             # Primal minimization: a suboptimal solve returns Q >= Q*, and the
-            # enumerative cut built from it removes a feasible point.
+            # enumerative cut built from it would remove a feasible point. Its
+            # bound ObjBound <= Q*, however, is safe: the enumerative cut with
+            # Q_lb in place of Q is valid (weaker), and it is still violated
+            # whenever theta_hat < Q_lb.
             if sub_model.status == GRB.OPTIMAL:
                 return self._subproblem_objective(sub_model), {}
-            else:
-                return None, None
+            self.last_subproblem_status = sub_model.status
+            if sub_model.status == GRB.SUBOPTIMAL:
+                try:
+                    q_lb = float(sub_model.ObjBound)
+                except Exception:
+                    q_lb = None
+                if q_lb is not None and np.isfinite(q_lb):
+                    return q_lb, {'partial': True}
+            return None, None
 
 
         elif self.model_type == 'seq':
@@ -500,10 +512,15 @@ class CETSP_L2_Solver:
                 sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation, GRB.MAXIMIZE)
             sub_model.optimize()
 
-            if sub_model.status == GRB.OPTIMAL:
+            # Dual maximization: any feasible dual point gives a valid cut whose
+            # value at x_hat is a lower bound on Q*, so a suboptimal solve with
+            # a solution is still usable (the cut is just weaker).
+            if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
+                if sub_model.status != GRB.OPTIMAL:
+                    self.last_subproblem_status = sub_model.status
                 return self._subproblem_objective(sub_model), sub_model.getAttr('X', mu)
-            else:
-                return None, None
+            self.last_subproblem_status = sub_model.status
+            return None, None
 
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
@@ -540,7 +557,10 @@ class CETSP_L2_Solver:
             sub_model.setObjective(quicksum(obj_terms), GRB.MAXIMIZE)
             sub_model.optimize()
 
-            if sub_model.status == GRB.OPTIMAL:
+            # As in the sequence case: a feasible dual point is enough for a valid cut.
+            if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
+                if sub_model.status != GRB.OPTIMAL:
+                    self.last_subproblem_status = sub_model.status
                 # Extract gamma
                 gamma_vals = {(i, j, dim): gamma[i, j, dim].X for i, j in tour_arcs for dim in range(2)}
                 
@@ -623,6 +643,8 @@ class CETSP_L2_Solver:
 
             sub_model.optimize()
 
+            if sub_model.status != GRB.OPTIMAL:
+                self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL:
                 sub_obj = self._subproblem_objective(sub_model)
                 pi_tau = sink_constr.Pi
