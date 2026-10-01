@@ -425,7 +425,7 @@ class CETSP_L2_Solver:
                     print('[CETSP] Gurobi ObjVal disagrees with the stored objective on the '
                           '%s subproblem (ObjVal=%.9g, recomputed=%.9g); using the recomputed '
                           'value. Not printed again this run.'
-                          % (self.model_type, reported, val), file=sys.stderr)
+                          % (self.model_type, reported, val), file=sys.stderr, flush=True)
         except Exception:
             pass
         return val

@@ -1,4 +1,5 @@
 import sys
+import traceback
 import time
 from gurobipy import Model, GRB, quicksum
 import networkx as nx
@@ -102,7 +103,12 @@ class CETSPModel:
             self._retrieve_solution()
 
         except Exception as e:
-            print(f"An error occurred during optimization: {e}")
+            # stderr and flush: stdout is block-buffered when redirected to a
+            # log file, so a message printed there is only written when the
+            # process exits, and is lost if it crashes.
+            print(f"An error occurred during optimization: {e}", file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
 
     def optimize_bs(self, time_limit: int = 600, max_iterations: int = 5):
         """
@@ -268,7 +274,7 @@ class CETSPModel:
                 f"[CETSP] subproblem failed to solve to the required status "
                 f"({context}, model_type={self.model_type}). "
                 f"Further occurrences this run are counted but not printed.",
-                file=sys.stderr,
+                file=sys.stderr, flush=True,
             )
             self._sub_failure_warned = True
 
