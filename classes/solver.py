@@ -675,10 +675,15 @@ class CETSP_L2_Solver:
 
         elif self.model_type == 'seq':
             if 'dual' in cut_type:
-                if not self.extended:
-                    self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) <= self.theta)
-                else:
-                    self.model.cbLazy(quicksum(duals[i,k]*self.x[i,k] for i in range(self.n) for k in range(self.n)) - quicksum(self.d[k] for k in range(self.n)) <= self.theta)
+                # Cut (14)/(17) for z_hat and for its reverse sequence. Reversing the
+                # visit order maps position k to (n - k) mod n (depot fixed at 0);
+                # relabelling the dual accordingly (rho^d with a sign flip) keeps
+                # it feasible and optimal, so mu'_{i,k} = mu_{i,(n-k) mod n}.
+                for pos in (lambda k: k, lambda k: (self.n - k) % self.n):
+                    lhs = quicksum(duals[i, k] * self.x[i, pos(k)] for i in range(self.n) for k in range(self.n))
+                    if self.extended:
+                        lhs -= quicksum(self.d[k] for k in range(self.n))
+                    self.model.cbLazy(lhs <= self.theta)
             if 'enumerative' in cut_type:
                 tour_seq = []
                 for i in range(self.n):
@@ -739,11 +744,18 @@ class CETSP_L2_Solver:
                                        - self.data.centers[j][1] * eta_j_1
                                        + norm_eta_j * self.data.radii[j])
 
-                if not self.extended:
-                    coeffs = (-(self.estimation + C))[self._cut_rows, self._cut_cols].tolist()
-                else:
-                    coeffs = (-C)[self._cut_rows, self._cut_cols].tolist() + self._cut_tail
-                self.model.cbLazy(LinExpr(coeffs, self._cut_vars) <= self.theta)
+                # Cut for x_hat, and the cut for its reverse tour. If (eta, gamma) is
+                # optimal for x_hat, then (-eta, -gamma) with gamma'_{ji} = -gamma_{ij}
+                # is optimal for the reverse tour and yields C'_{ji} = C_{ij}: the
+                # coefficient matrix of the reverse cut is the transpose, in both the
+                # plain and the optimised completion (the completion problem (11)
+                # for (j, i) with anchors -eta is (11) for (i, j) under gamma -> -gamma).
+                for coef_mat in (C, C.T):
+                    if not self.extended:
+                        coeffs = (-(self.estimation + coef_mat))[self._cut_rows, self._cut_cols].tolist()
+                    else:
+                        coeffs = (-coef_mat)[self._cut_rows, self._cut_cols].tolist() + self._cut_tail
+                    self.model.cbLazy(LinExpr(coeffs, self._cut_vars) <= self.theta)
 
             if 'enumerative' in cut_type:
                 delta = LinExpr()

@@ -317,10 +317,11 @@ class CETSPModel:
                     if self.model_type == 'BS':
                         self.cuts += 1
                     elif self.cut_type == 'dual' and self.model_type in ['seq', 'perspective']:
-                        self.cuts += 1
+                        # Dual cut for x_hat and for its reverse
+                        self.cuts += 2
                     elif self.cut_type == 'dual+enumerative' and self.model_type in ['seq', 'perspective']:
-                        # Both dual and enumerative cuts are added
-                        self.cuts += 3
+                        # Dual cuts (x_hat and reverse) plus the enumerative pair
+                        self.cuts += 4
                     else:
                         # Enumerative cuts are added in pairs
                         self.cuts += 2
