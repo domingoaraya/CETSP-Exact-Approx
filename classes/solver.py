@@ -8,7 +8,7 @@ from classes.cut_coefficients import MAX_ITER, fill_coefficients, pack_instance
 _objval_mismatch_warned = False
 
 # Numerical focus for arc SOCPs to avoid numerical issues. Value selected after careful testing. 
-_ARC_NUMERIC_FOCUS = 2
+#_ARC_NUMERIC_FOCUS = 2
 
 
 class CETSP_L2_Solver:
@@ -54,9 +54,9 @@ class CETSP_L2_Solver:
         self.model.setParam('OutputFlag', 0)
         self.model.setParam('Threads', self.threads)
 
-        if self.model_type == 'arc' and not self.extended and not self.decomposition:
+        #if self.model_type == 'arc' and not self.extended and not self.decomposition:
             # Avoid numerical issues in arc-based SOCPs
-            self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
+        #    self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
 
         if self.model_type == "BS":
             self._build_bs_master_model()
@@ -447,7 +447,7 @@ class CETSP_L2_Solver:
         sub_model.setParam('Threads', self.threads)
 
         if self.model_type == 'arc':
-            sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
+            #sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
             p_x = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
             p_y = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
             self._apply_arc_point_bounds(p_x, p_y)
