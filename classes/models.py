@@ -86,24 +86,25 @@ class CETSPModel:
             time_limit (int, optional): The time limit for the solver in seconds. Defaults to 600.
             max_iterations (int, optional): Maximum cell refinement iterations for BS. Defaults to 5.
         """
-        if self.model_type == 'BS':
-            self.optimize_bs(time_limit=time_limit, max_iterations=max_iterations)
-            return
-
+        # Wall-clock time of the whole solve, for every formulation: the
+        # branch-and-cut with its callbacks and subproblems, the BS refinement
+        # loop, and the exact SOCP that recomputes the upper bound.
+        start_time = time.time()
         try:
-            self.model.setParam('TimeLimit', time_limit)
-            # PreCrush is required for cbCut() to work with presolved model
-            if self.strengthen and self.model_type in ['arc', 'perspective']:
-                self.model.Params.PreCrush = 1
+            if self.model_type == 'BS':
+                self.optimize_bs(time_limit=time_limit, max_iterations=max_iterations)
+            else:
+                self.model.setParam('TimeLimit', time_limit)
+                # PreCrush is required for cbCut() to work with presolved model
+                if self.strengthen and self.model_type in ['arc', 'perspective']:
+                    self.model.Params.PreCrush = 1
 
-            if self.decomposition:
-                # LazyConstraints is only needed for cbLazy (decomposition/Benders cuts)
-                self.model.Params.LazyConstraints = 1
+                if self.decomposition:
+                    # LazyConstraints is only needed for cbLazy (decomposition/Benders cuts)
+                    self.model.Params.LazyConstraints = 1
 
-            self.model.optimize(self._unified_callback)
-            
-            self.runtime = self.model.Runtime
-            self._retrieve_solution()
+                self.model.optimize(self._unified_callback)
+                self._retrieve_solution()
 
         except Exception as e:
             # stderr and flush: stdout is block-buffered when redirected to a
@@ -112,6 +113,8 @@ class CETSPModel:
             print(f"An error occurred during optimization: {e}", file=sys.stderr, flush=True)
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
+        finally:
+            self.runtime = time.time() - start_time
 
     def optimize_bs(self, time_limit: int = 600, max_iterations: int = 5):
         """
@@ -202,7 +205,6 @@ class CETSPModel:
                     self.model.addConstr(lhs >= rhs, name=f"refined_cut_iter_{iteration}")
                     self.cuts += 1
 
-        self.runtime = time.time() - start_time
         if best_bound > -float('inf'):
             self.lower_bound = best_bound
         else:
@@ -287,111 +289,136 @@ class CETSPModel:
     def _unified_callback(self, model, where):
         """
         Gurobi callback for lazy constraints (MIPSOL) and DFJ user cuts (MIPNODE).
+
+        gurobipy swallows exceptions raised inside a callback, so one raised
+        while separating an incumbent would let it through silently. The MIPSOL
+        branch is therefore guarded: an exception is recorded as a subproblem
+        failure, the same outcome as a subproblem that returns nothing.
         """
         if where == GRB.Callback.MIPSOL:
-            # Only run subproblem / Benders logic for decomposition or BS models
-            if self.decomposition or self.model_type == 'BS':
-                x_sol = model.cbGetSolution(self.solver.x)
-
-                # 1. Subtour Check FIRST for BS model
-                if self.model_type == 'BS':
-                    subtours = self._find_subtours(x_sol)
-                    if len(subtours) > 1:
-                        for S in subtours:
-                            model.cbLazy(quicksum(self.solver.x[i, j] for i in S for j in S) <= len(S) - 1)
-                            self.dfj_cuts += 1
-                        return  # EXIT IMMEDIATELY - Do not run subproblem on disconnected tours
-
-                # 2. Subproblem Execution (Only reached if tour is fully connected)
-                current_objective = model.cbGet(GRB.Callback.MIPSOL_OBJ)
-                current_estimation = current_objective - model.cbGetSolution(self.solver.theta)
-                
-                # Extract d_sol for PBF extended decomposition
-                d_sol = model.cbGetSolution(self.solver.d) if self.model_type == 'perspective' and self.extended else None
-
-                # Solve the subproblem
-                sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation, d_sol)
-
-                if sub_obj is None:
-                    # No usable information: the solution stays unverified. The
-                    # final upper bound is recomputed from the tour itself in
-                    # _retrieve_solution, so this cannot corrupt the reported UB.
-                    self._record_subproblem_failure("MIPSOL callback, no cut generated")
-                    return
-                if isinstance(duals, dict) and duals.get('partial'):
-                    # Lower bound on Q from a suboptimal primal: valid cut, weaker.
-                    self._record_subproblem_failure("MIPSOL callback, cut from ObjBound")
-                    duals = {}
-
-                # Dual cuts on extended formulations can lead to subproblem taking
-                # negative value due to their involvement of the distance variables.
-                if not self.extended and sub_obj < -1e-6:
-                    self._record_subproblem_failure(
-                        f"negative Q(x_hat)={sub_obj:.6g}.")
-                    return
-
-                if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
-                    # Dual and/or enumerative cut for x_hat, plus the reverse-tour
-                    # versions unless symmetry breaking makes them pointless.
-                    self.cuts += self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
-
+            try:
+                self._mipsol_callback(model)
+            except Exception as e:
+                self._record_subproblem_failure(
+                    f"MIPSOL callback raised {type(e).__name__}: {e}; incumbent accepted unverified")
         elif where == GRB.Callback.MIPNODE:
-            if model.cbGet(GRB.Callback.MIPNODE_NODCNT) == 0:
-                self.root_bound = model.cbGet(GRB.Callback.MIPNODE_OBJBND)
+            self._mipnode_callback(model)
 
-            # DFJ fractional separation at the root node
-            if not (self.strengthen and self.model_type in ['arc', 'perspective']):
+    def _mipsol_callback(self, model):
+        """Lazy separation of an integer incumbent (decomposition and BS)."""
+        # Only run subproblem / Benders logic for decomposition or BS models
+        if self.decomposition or self.model_type == 'BS':
+            x_sol = model.cbGetSolution(self.solver.x)
+
+            # 1. Subtour Check FIRST for BS model
+            if self.model_type == 'BS':
+                subtours = self._find_subtours(x_sol)
+                if len(subtours) > 1:
+                    for S in subtours:
+                        model.cbLazy(quicksum(self.solver.x[i, j] for i in S for j in S) <= len(S) - 1)
+                        self.dfj_cuts += 1
+                    return  # EXIT IMMEDIATELY - Do not run subproblem on disconnected tours
+
+            # 2. Subproblem Execution (Only reached if tour is fully connected)
+            # current_estimation is the incumbent's objective without theta
+            # (sum E x on the plain arc/perspective masters, sum d on the
+            # extended ones, 0 on the plain sequence master), so the
+            # subproblem returns Q = tour length - current_estimation and the
+            # incumbent's objective is a valid upper bound iff theta_hat >= Q.
+            theta_hat = model.cbGetSolution(self.solver.theta)
+            current_estimation = model.cbGet(GRB.Callback.MIPSOL_OBJ) - theta_hat
+
+            sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
+            # Weak means the value is only a lower bound on Q (suboptimal
+            # subproblem): the cut built from it is still valid.
+            weak = self.solver.last_subproblem_status is not None
+
+            # The same decision on every route. An incumbent is accepted (no
+            # violated lazy cut) only when theta_hat >= Q is certified; it is
+            # accepted unverified, and counted as a failure, when there is no
+            # Q to compare against or when only a weak bound is available and
+            # it does not separate the point. The reported upper bound is
+            # always recomputed from the tour in _retrieve_solution.
+            if sub_obj is None:
+                self._record_subproblem_failure(
+                    "MIPSOL callback, no subproblem solution, incumbent accepted unverified")
+                return
+            # Q >= 0 on the plain masters (tour length >= sum E over the
+            # tour); on the extended ones sum d can exceed the length, so
+            # a negative Q is legitimate there.
+            if not self.extended and sub_obj < -1e-6 * max(1.0, abs(current_estimation)):
+                self._record_subproblem_failure(
+                    f"MIPSOL callback, negative Q(x_hat)={sub_obj:.6g}, incumbent accepted unverified")
                 return
 
-            # Only separate at the root node with an optimal relaxation
-            if (model.cbGet(GRB.Callback.MIPNODE_NODCNT) != 0 or
-                    model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL):
-                return
+            if theta_hat < sub_obj - 1e-6:
+                # The cut's value at x_hat is sub_obj, so it removes the
+                # incumbent whether Q is exact or weak. Dual and/or
+                # enumerative cut for x_hat, plus the reverse-tour versions
+                # unless symmetry breaking makes them pointless.
+                self.cuts += self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
+            elif weak:
+                self._record_subproblem_failure(
+                    "MIPSOL callback, weak cut not violated, incumbent accepted unverified")
 
-            DFJ_TOP_K = 1  # Number of most-violated DFJ cuts to inject per callback
+    def _mipnode_callback(self, model):
+        """Root bound bookkeeping and DFJ user cuts at the root node."""
+        if model.cbGet(GRB.Callback.MIPNODE_NODCNT) == 0:
+            self.root_bound = model.cbGet(GRB.Callback.MIPNODE_OBJBND)
 
-            n = self.data.n
-            x_frac = model.cbGetNodeRel(self.solver.x)
+        # DFJ fractional separation at the root node
+        if not (self.strengthen and self.model_type in ['arc', 'perspective']):
+            return
 
-            # Bulk-update edge capacities from fractional solution
-            capacities = {
-                (i, j): x_frac[i, j]
-                for i in range(n) for j in range(n) if i != j
-            }
-            nx.set_edge_attributes(self.G, capacities, 'capacity')
+        # Only separate at the root node with an optimal relaxation
+        if (model.cbGet(GRB.Callback.MIPNODE_NODCNT) != 0 or
+                model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL):
+            return
 
-            # Find all violated subsets via min s-t cuts from depot (s=0)
-            violated = []
-            for t in range(1, n):
-                cut_value, partition = nx.minimum_cut(self.G, 0, t, capacity='capacity')
-                if cut_value < 1 - 1e-4:
-                    S = frozenset(partition[1])  # sink side (contains t)
-                    violation = 1.0 - cut_value
-                    violated.append((S, violation))
+        DFJ_TOP_K = 1  # Number of most-violated DFJ cuts to inject per callback
 
-            if not violated:
-                return
+        n = self.data.n
+        x_frac = model.cbGetNodeRel(self.solver.x)
 
-            # Deduplicate identical subsets, keeping max violation
-            unique = {}
-            for S, viol in violated:
-                if S not in unique or viol > unique[S]:
-                    unique[S] = viol
+        # Bulk-update edge capacities from fractional solution
+        capacities = {
+            (i, j): x_frac[i, j]
+            for i in range(n) for j in range(n) if i != j
+        }
+        nx.set_edge_attributes(self.G, capacities, 'capacity')
 
-            # Top-K filtering: pick the most violated unique subsets
-            top_k = sorted(unique.items(), key=lambda item: item[1], reverse=True)[:DFJ_TOP_K]
+        # Find all violated subsets via min s-t cuts from depot (s=0)
+        violated = []
+        for t in range(1, n):
+            cut_value, partition = nx.minimum_cut(self.G, 0, t, capacity='capacity')
+            if cut_value < 1 - 1e-4:
+                S = frozenset(partition[1])  # sink side (contains t)
+                violation = 1.0 - cut_value
+                violated.append((S, violation))
 
-            # Inject DFJ cut-set inequalities: sum_{i in S, j not in S} x_{ij} >= 1
-            N = set(range(n))
-            for S, _ in top_k:
-                S_complement = N - S
-                model.cbCut(
-                    quicksum(
-                        self.solver.x[i, j]
-                        for i in S for j in S_complement
-                    ) >= 1
-                )
-                self.dfj_cuts += 1
+        if not violated:
+            return
+
+        # Deduplicate identical subsets, keeping max violation
+        unique = {}
+        for S, viol in violated:
+            if S not in unique or viol > unique[S]:
+                unique[S] = viol
+
+        # Top-K filtering: pick the most violated unique subsets
+        top_k = sorted(unique.items(), key=lambda item: item[1], reverse=True)[:DFJ_TOP_K]
+
+        # Inject DFJ cut-set inequalities: sum_{i in S, j not in S} x_{ij} >= 1
+        N = set(range(n))
+        for S, _ in top_k:
+            S_complement = N - S
+            model.cbCut(
+                quicksum(
+                    self.solver.x[i, j]
+                    for i in S for j in S_complement
+                ) >= 1
+            )
+            self.dfj_cuts += 1
 
     def compute_upper_bound(self, x_sol):
         """
@@ -411,11 +438,14 @@ class CETSPModel:
         ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads, symmetry_breaking=False)
         ub_solver.build()
 
-        # Fix integer variables
+        # Fix the integer variables to the rounded incumbent: MIP values can
+        # sit up to IntFeasTol away from 0/1, and a binary with fractional
+        # equal bounds would be infeasible.
         for i in range(self.data.n):
             for j in range(self.data.n):
-                ub_solver.x[i, j].lb = x_sol[i, j]
-                ub_solver.x[i, j].ub = x_sol[i, j]
+                v = 1.0 if x_sol[i, j] > 0.5 else 0.0
+                ub_solver.x[i, j].lb = v
+                ub_solver.x[i, j].ub = v
         
         ub_model.optimize()
 
@@ -497,20 +527,23 @@ class CETSPModel:
                 # The master objective equals the tour length only if every
                 # incumbent was verified by the subproblem. A subproblem that
                 # failed lets an unverified incumbent through, so the reported UB
-                # is always the length of the tour recomputed by the exact SOCP.
+                # is the length of the tour recomputed by the exact SOCP whenever
+                # that recomputation succeeds. The two differ by solver
+                # tolerances on a healthy run, so a mismatch is only reported as
+                # an unverified incumbent when a subproblem actually failed.
                 self.upper_bound = self.model.ObjVal
                 self._extract_arcs_and_points()
                 ub_true, _, plot_points = self.compute_upper_bound(x_sol)
                 if plot_points:
                     self.points = plot_points
                 if ub_true != float('inf'):
-                    if ub_true > self.upper_bound + 1e-6 * max(1.0, abs(ub_true)):
+                    if self.subproblem_failures > 0 and ub_true > self.upper_bound + 1e-6 * max(1.0, abs(ub_true)):
                         self.unverified_incumbent = True
                         print(f"[CETSP] master objective {self.upper_bound:.9g} is below the true "
                               f"length {ub_true:.9g} of the incumbent tour (a subproblem failure "
                               f"let it through); reporting the true length.",
                               file=sys.stderr, flush=True)
-                    self.upper_bound = max(self.upper_bound, ub_true)
+                    self.upper_bound = ub_true
             else:
                 # Monolithic SOCP models: the model objective is the true UB.
                 self.upper_bound = self.model.ObjVal

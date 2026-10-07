@@ -435,18 +435,21 @@ class CETSP_L2_Solver:
         """
         self._create_variables()
         self._create_degree_constraints()
-        if self.model_type in ['arc', 'perspective']:
-            self._create_subtour_elimination_constraints()
-        elif self.model_type == "seq":
-            self.x[0, 0].lb = 1
-        
+
         if self.extended:
+            # The formulation-specific parts carry their own subtour
+            # elimination (arc, perspective) or depot fixing (seq).
             if self.model_type == "arc":
                 self._create_arc_formulation_specific_parts()
             elif self.model_type == "seq":
                 self._create_seq_formulation_specific_parts()
             elif self.model_type == "perspective":
                 self._create_perspective_formulation_specific_parts()
+        else:
+            if self.model_type in ['arc', 'perspective']:
+                self._create_subtour_elimination_constraints()
+            elif self.model_type == "seq":
+                self.x[0, 0].lb = 1
 
         self._set_objective()
         
@@ -475,18 +478,29 @@ class CETSP_L2_Solver:
             pass
         return val
 
-    def _solve_subproblem(self, x_sol, current_estimation, d_sol=None):
+    def _solve_subproblem(self, x_sol, current_estimation):
         """
         Solves the subproblem for a given integer solution.
 
         Args:
             x_sol (dict): A dictionary with the values of the x variables.
-            current_estimation (float): The current distance estimation from the master problem.
-            d_sol (dict): The distance variable values (used by the CBF extended decomposition).
+            current_estimation (float): The part of the master objective other
+                than theta at x_sol: sum E_ij x_ij on the plain arc/perspective
+                masters, sum d on the extended masters, 0 on the plain sequence
+                master. The subproblem value is Q = (tour length) - current_estimation
+                on every route, so that theta >= Q is the Benders condition.
 
         Returns:
-            A tuple containing the subproblem objective value and the dual variables.
+            A tuple (sub_obj, duals). Every route follows the same contract:
+            - solved to optimality: sub_obj = Q(x_sol), last_subproblem_status is None;
+            - usable but weak (status SUBOPTIMAL with a solution on the dual
+              subproblems, with a finite ObjBound on the primal one): sub_obj is a
+              lower bound on Q, the cut built from it is valid, and
+              last_subproblem_status holds the Gurobi status so the caller can
+              tell the value is weak;
+            - no usable information: (None, None), with last_subproblem_status set.
         """
+        self.last_subproblem_status = None
         sub_model = Model("subproblem")
         sub_model.setParam('OutputFlag', 0)
         sub_model.setParam('Threads', self.threads)
@@ -507,10 +521,9 @@ class CETSP_L2_Solver:
             sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             sub_model.addConstrs((d[i,j]**2 >= (p_x[i] - p_x[j])**2 + (p_y[i] - p_y[j])**2 for i,j in tour_arcs), name="distance")
 
-            if not self.extended:
-                sub_model.setObjective(quicksum(d[i,j] - self.estimation[i,j] for i,j in tour_arcs), GRB.MINIMIZE)
-            else:
-                sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
+            # Q = tour length - current_estimation on both the plain master
+            # (current_estimation = sum E_ij x_ij) and the extended one (sum d).
+            sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
             # Primal minimization: a suboptimal solve returns Q >= Q*, and the
             # enumerative cut built from it would remove a feasible point. Its
@@ -526,7 +539,7 @@ class CETSP_L2_Solver:
                 except Exception:
                     q_lb = None
                 if q_lb is not None and np.isfinite(q_lb):
-                    return q_lb, {'partial': True}
+                    return q_lb, {}
             return None, None
 
 
@@ -549,20 +562,18 @@ class CETSP_L2_Solver:
             sub_model.addConstrs(rho_d[k,0]**2 + rho_d[k,1]**2 <= lambda_d[k]**2 for k in range(self.n))
             sub_model.addConstrs(rho_c[k,0]**2 + rho_c[k,1]**2 <= lambda_c[k]**2 for k in range(self.n))
 
-            if not self.extended:
-                sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)), GRB.MAXIMIZE)
-            else:
-                sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation, GRB.MAXIMIZE)
+            # Q = tour length - current_estimation (0 on the plain sequence
+            # master, whose objective is theta alone; sum d on the extended one).
+            sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation, GRB.MAXIMIZE)
             sub_model.optimize()
 
             # Dual maximization: any feasible dual point gives a valid cut whose
             # value at x_hat is a lower bound on Q*, so a suboptimal solve with
             # a solution is still usable (the cut is just weaker).
+            if sub_model.status != GRB.OPTIMAL:
+                self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
-                if sub_model.status != GRB.OPTIMAL:
-                    self.last_subproblem_status = sub_model.status
                 return self._subproblem_objective(sub_model), sub_model.getAttr('X', mu)
-            self.last_subproblem_status = sub_model.status
             return None, None
 
         elif self.model_type == 'perspective':
@@ -587,23 +598,26 @@ class CETSP_L2_Solver:
                 name="tau_bound"
             )
             
-            obj_terms = []
+            # Dual objective: sum over the tour of (c_i - c_j).gamma_ij minus the
+            # tau terms is the tour length; the constant below turns it into
+            # Q = length - current_estimation, as on the arc and sequence routes
+            # (on the plain master current_estimation = sum E_ij over the tour).
+            obj = LinExpr()
             for i, j in tour_arcs:
-                E_ij = d_sol[i,j] if self.extended else self.estimation[i,j]
-                obj_terms.append(
-                    (self.data.centers[i][0] - self.data.centers[j][0]) * gamma[i,j,0] +
-                    (self.data.centers[i][1] - self.data.centers[j][1]) * gamma[i,j,1] - E_ij
-                )
+                obj.addTerms([self.data.centers[i][0] - self.data.centers[j][0],
+                              self.data.centers[i][1] - self.data.centers[j][1]],
+                             [gamma[i, j, 0], gamma[i, j, 1]])
             for i in range(self.n):
-                obj_terms.append(-self.data.radii[i] * tau[i])
-            
-            sub_model.setObjective(quicksum(obj_terms), GRB.MAXIMIZE)
+                obj.addTerms([-self.data.radii[i]], [tau[i]])
+            obj.addConstant(-current_estimation)
+
+            sub_model.setObjective(obj, GRB.MAXIMIZE)
             sub_model.optimize()
 
             # As in the sequence case: a feasible dual point is enough for a valid cut.
+            if sub_model.status != GRB.OPTIMAL:
+                self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
-                if sub_model.status != GRB.OPTIMAL:
-                    self.last_subproblem_status = sub_model.status
                 # Extract gamma
                 gamma_vals = {(i, j, dim): gamma[i, j, dim].X for i, j in tour_arcs for dim in range(2)}
                 
@@ -686,6 +700,8 @@ class CETSP_L2_Solver:
 
             sub_model.optimize()
 
+            # The BS cut needs the LP duals, which Gurobi only provides on an
+            # optimal solve: no weak variant here.
             if sub_model.status != GRB.OPTIMAL:
                 self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL:
