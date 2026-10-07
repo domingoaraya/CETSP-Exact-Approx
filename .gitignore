@@ -16,3 +16,6 @@ References/
 
 # Ignore test files
 test_*.py
+
+logs/*
+gurobi_logs/*

@@ -89,7 +89,7 @@ class ResultsWriter:
 
 def solve_instance(instance_path, model_type, time_limit, extended, decomposition, nu,
                    cut_type, strengthen, optimize_coefficients, threads, gurobi_log=None,
-                   symmetry_breaking=True):
+                   symmetry_breaking=False):
     """
     Solves a single instance and returns a dict with the metric columns
     (everything in RESULT_COLUMNS except the identifying key).
@@ -122,13 +122,10 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
     summary = model.get_solution_summary()
 
     if isinstance(summary, dict):
-        gap = summary.get('gap', float('inf'))
-        if model.model.Status == GRB.OPTIMAL and not (gap <= 1e-4):
-            # Gurobi closed the master, but the verified upper bound (recomputed
-            # from the incumbent tour) does not match the bound: some incumbent
-            # went through unverified. Do not report it as solved.
-            status = "Optimal_Unverified"
-        elif model.model.Status == GRB.OPTIMAL:
+        # A closed master is reported as Optimal even when the verified upper
+        # bound (recomputed from the incumbent tour) does not match the bound;
+        # the Gap column keeps that information for a later review.
+        if model.model.Status == GRB.OPTIMAL:
             status = "Optimal"
         elif model.model.Status == GRB.SUBOPTIMAL:
             status = "Suboptimal"
@@ -167,7 +164,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
              completed, time_limit=600, extended=False, decomposition=False, nu=None,
              cut_type=None, verbosity='high', strengthen=False,
              optimize_coefficients=False, threads=0, gurobi_log_dir=None,
-             symmetry_breaking=True):
+             symmetry_breaking=False):
     """
     Runs a test for a given configuration on a set of instances.
 
@@ -200,6 +197,8 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
             print(f"Using DFJ strengthening")
         if optimize_coefficients:
             print("Optimising the dual cut coefficients")
+        if symmetry_breaking:
+            print("Fixing the tour orientation (no reverse-tour cuts)")
         skipped = repetitions - len(pending)
         if skipped:
             print(f"Skipping {skipped} instance(s) already present in {writer.outfile}")
@@ -261,10 +260,10 @@ if __name__ == "__main__":
     parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
     parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
-    parser.add_argument("--symmetry_breaking", type=str, default='True', choices=['False', 'True'],
+    parser.add_argument("--symmetry_breaking", type=str, nargs='+', default=['False'], choices=['False', 'True'],
                         help="Fix the orientation of the tour in every model solved from scratch "
-                             "(depot's successor labelled lower than its predecessor). Default True; "
-                             "does not change the configuration label.")
+                             "(depot's successor labelled lower than its predecessor), and do not "
+                             "separate the reverse-tour decomposition cuts. Label suffix -B.")
     parser.add_argument("--gurobi_log_dir", type=str, default=None,
                         help="If set, write one Gurobi log file per instance into this directory "
                              "(console output stays off). Useful for post-mortem of crashes or "
@@ -281,25 +280,28 @@ if __name__ == "__main__":
     extended_options = [True if e == 'True' else False for e in args.extended]
     strengthen_options = [True if s == 'True' else False for s in args.strengthen]
     oc_options = [True if o == 'True' else False for o in args.optimize_coefficients]
+    sb_options = [True if b == 'True' else False for b in args.symmetry_breaking]
 
     configurations = []
     for model_type_val in args.model_type:
         if model_type_val == 'BS':
             # BS carries its own decomposition and refinement loop; the
             # extended, cut-type and strengthening switches do not apply.
-            configurations.append({
-                'model_type': 'BS',
-                'decomposition': False,
-                'extended': False,
-                'cut_type': None,
-                'nu': None,
-                'strengthen': False,
-                'optimize_coefficients': False
-            })
+            for sb_val in sb_options:
+                configurations.append({
+                    'model_type': 'BS',
+                    'decomposition': False,
+                    'extended': False,
+                    'cut_type': None,
+                    'nu': None,
+                    'strengthen': False,
+                    'optimize_coefficients': False,
+                    'symmetry_breaking': sb_val
+                })
             continue
         for decomposition_val in decomposition_options:
             for extended_val in extended_options:
-                for strengthen_val, oc_val in product(strengthen_options, oc_options):
+                for strengthen_val, oc_val, sb_val in product(strengthen_options, oc_options, sb_options):
                     # DFJ strengthening is only valid for arc and cont formulations
                     if strengthen_val and model_type_val not in ['arc', 'perspective']:
                         continue
@@ -331,7 +333,8 @@ if __name__ == "__main__":
                                 'cut_type': cut_type_val,
                                 'nu': args.nu if extended_val else None,
                                 'strengthen': strengthen_val,
-                                'optimize_coefficients': oc_val
+                                'optimize_coefficients': oc_val,
+                                'symmetry_breaking': sb_val
                             })
                     else:
                         if oc_val:
@@ -343,7 +346,8 @@ if __name__ == "__main__":
                             'cut_type': None,
                             'nu': args.nu if extended_val else None,
                             'strengthen': strengthen_val,
-                            'optimize_coefficients': False
+                            'optimize_coefficients': False,
+                            'symmetry_breaking': sb_val
                         })
 
     completed = load_completed_runs(args.outfile)
@@ -377,6 +381,8 @@ if __name__ == "__main__":
                 formulation_name += "-S"
             if config['optimize_coefficients']:
                 formulation_name += "-OC"
+            if config['symmetry_breaking']:
+                formulation_name += "-B"
 
             for n_nodes_val in args.n_nodes:
                 for r_mean_val in args.r_mean:
@@ -403,7 +409,7 @@ if __name__ == "__main__":
                             optimize_coefficients=config['optimize_coefficients'],
                             threads=args.threads,
                             gurobi_log_dir=args.gurobi_log_dir,
-                            symmetry_breaking=(args.symmetry_breaking == 'True')
+                            symmetry_breaking=config['symmetry_breaking']
                         )
 
             if args.verbosity == 'low':

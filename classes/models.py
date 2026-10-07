@@ -331,18 +331,9 @@ class CETSPModel:
                     return
 
                 if model.cbGetSolution(self.solver.theta) < sub_obj - 1e-6:
-                    self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
-                    if self.model_type == 'BS':
-                        self.cuts += 1
-                    elif self.cut_type == 'dual' and self.model_type in ['seq', 'perspective']:
-                        # Dual cut for x_hat and for its reverse
-                        self.cuts += 2
-                    elif self.cut_type == 'dual+enumerative' and self.model_type in ['seq', 'perspective']:
-                        # Dual cuts (x_hat and reverse) plus the enumerative pair
-                        self.cuts += 4
-                    else:
-                        # Enumerative cuts are added in pairs
-                        self.cuts += 2
+                    # Dual and/or enumerative cut for x_hat, plus the reverse-tour
+                    # versions unless symmetry breaking makes them pointless.
+                    self.cuts += self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
 
         elif where == GRB.Callback.MIPNODE:
             if model.cbGet(GRB.Callback.MIPNODE_NODCNT) == 0:

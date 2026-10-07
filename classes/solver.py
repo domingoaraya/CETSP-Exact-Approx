@@ -716,7 +716,16 @@ class CETSP_L2_Solver:
             sub_obj (float): The objective value of the subproblem.
             duals (dict): The dual variables from the subproblem.
             cut_type (str): The type of cut to add ('dual', 'enumerative', or 'dual+enumerative').
+
+        Every cut is also added for the reverse tour unless symmetry_breaking
+        is set: the orientation constraint then makes the reverse tour
+        infeasible for the master, so its cut is not separated.
+
+        Returns:
+            int: number of cuts added.
         """
+        add_reverse = not self.symmetry_breaking
+        n_added = 0
 
         # Avoid numerical issues
         sub_obj = max(0.0, sub_obj)
@@ -736,7 +745,10 @@ class CETSP_L2_Solver:
                 delta_rev += (1 - self.x[j,i])
 
             self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
-            self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+            n_added += 1
+            if add_reverse:
+                self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+                n_added += 1
 
         elif self.model_type == 'seq':
             if 'dual' in cut_type:
@@ -744,11 +756,15 @@ class CETSP_L2_Solver:
                 # visit order maps position k to (n - k) mod n (depot fixed at 0);
                 # relabelling the dual accordingly (rho^d with a sign flip) keeps
                 # it feasible and optimal, so mu'_{i,k} = mu_{i,(n-k) mod n}.
-                for pos in (lambda k: k, lambda k: (self.n - k) % self.n):
+                positions = [lambda k: k]
+                if add_reverse:
+                    positions.append(lambda k: (self.n - k) % self.n)
+                for pos in positions:
                     lhs = quicksum(duals[i, k] * self.x[i, pos(k)] for i in range(self.n) for k in range(self.n))
                     if self.extended:
                         lhs -= quicksum(self.d[k] for k in range(self.n))
                     self.model.cbLazy(lhs <= self.theta)
+                    n_added += 1
             if 'enumerative' in cut_type:
                 tour_seq = []
                 for i in range(self.n):
@@ -766,7 +782,10 @@ class CETSP_L2_Solver:
                         delta_rev += (1 - self.x[i,k])
                 
                 self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
-                self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+                n_added += 1
+                if add_reverse:
+                    self.model.cbLazy(-(sub_obj/2)*delta_rev + sub_obj <= self.theta)
+                    n_added += 1
 
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
@@ -815,12 +834,13 @@ class CETSP_L2_Solver:
                 # coefficient matrix of the reverse cut is the transpose, in both the
                 # plain and the optimised completion (the completion problem (11)
                 # for (j, i) with anchors -eta is (11) for (i, j) under gamma -> -gamma).
-                for coef_mat in (C, C.T):
+                for coef_mat in ((C, C.T) if add_reverse else (C,)):
                     if not self.extended:
                         coeffs = (-(self.estimation + coef_mat))[self._cut_rows, self._cut_cols].tolist()
                     else:
                         coeffs = (-coef_mat)[self._cut_rows, self._cut_cols].tolist() + self._cut_tail
                     self.model.cbLazy(LinExpr(coeffs, self._cut_vars) <= self.theta)
+                    n_added += 1
 
             if 'enumerative' in cut_type:
                 delta = LinExpr()
@@ -830,12 +850,17 @@ class CETSP_L2_Solver:
                     delta_rev += (1 - self.x[j, i])
 
                 self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
-                self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+                n_added += 1
+                if add_reverse:
+                    self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+                    n_added += 1
 
         elif self.model_type == 'BS':
             lhs, rhs = self._generate_bs_cut_expr(x_sol, duals)
             if lhs is not None:
                 self.model.cbLazy(lhs >= rhs)
+                n_added += 1
+        return n_added
 
     def _generate_bs_cut_expr(self, x_sol, duals):
         """
