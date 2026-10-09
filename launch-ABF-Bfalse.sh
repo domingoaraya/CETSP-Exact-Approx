@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ---------------------------------------------------------------- parameters
-N_LIST=(10 15 20)
+N_LIST=(10 15 20 25)
 INSTANCES=5
 TIME_LIMIT=1800
 CPUSETS=(
@@ -97,43 +97,8 @@ CONFIGS=(
   "ABF-A-D|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
   "ABF-A-D-S|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --symmetry_breaking False"
   "ABF-A-S|--model_type arc --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  "ABF-D|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  "ABF-D-S|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --symmetry_breaking False"
   "ABF-S|--model_type arc --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  "BS|--model_type BS --symmetry_breaking False"
-  "PBF|--model_type perspective --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  "PBF-A|--model_type perspective --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  #"PBF-A-D-DE|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-A-D-DE-OC|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-A-D-DE-S|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-A-D-DE-S-OC|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-A-D-dual|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-A-D-dual-OC|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking False"
-  #"PBF-A-D-dual-S|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-A-D-dual-S-OC|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-A-D-enum|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking False"
-  "PBF-A-D-enum-S|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking False"
-  "PBF-A-S|--model_type perspective --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  #"PBF-D-DE|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-D-DE-OC|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-D-DE-S|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-D-DE-S-OC|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"PBF-D-dual|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-D-dual-OC|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking False"
-  #"PBF-D-dual-S|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-D-dual-S-OC|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking False"
-  "PBF-D-enum|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking False"
-  "PBF-D-enum-S|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking False"
-  "PBF-S|--model_type perspective --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  "SBF|--model_type seq --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  "SBF-A|--model_type seq --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  #"SBF-A-D-DE|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type dual+enumerative --symmetry_breaking False"
-  "SBF-A-D-dual|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type dual --symmetry_breaking False"
-  "SBF-A-D-enum|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type enumerative --symmetry_breaking False"
-  #"SBF-D-DE|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type dual+enumerative --symmetry_breaking False"
-  #"SBF-D-dual|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type dual --symmetry_breaking False"
-  #"SBF-D-enum|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type enumerative --symmetry_breaking False"
-)
+ )
 
 # ------------------------------------------------------------------ queue
 QUEUE="Results/.queue"

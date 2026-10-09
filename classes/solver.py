@@ -174,8 +174,8 @@ class CETSP_L2_Solver:
             if self.model_type == "arc":
                 # CONTINUOUS variables for the (activated) distance of each arc:
                 # d_ij = ||p_i - p_j|| if the tour uses (i, j), 0 otherwise. The
-                # big-M activation is folded into the distance constraint itself
-                # (see _create_distance_constraints), so no separate auxiliary
+                # activation is a single big-M-free conic constraint (see
+                # _create_distance_constraints), so no separate auxiliary
                 # variable is needed.
                 if not (self.decomposition and not self.extended):
                     self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
@@ -278,16 +278,34 @@ class CETSP_L2_Solver:
         """
         if not self.extended:
             if self.model_type == 'arc':
-                # ||p_i - p_j|| <= d_ij + M_ij (1 - x_ij): the cone and the big-M
-                # activation as a single constraint. Written on the auxiliary
-                # t_ij = d_ij + M_ij (1 - x_ij) (linear equality) so that the
-                # quadratic constraint ||p_i - p_j||^2 <= t_ij^2 has no products
-                # d_ij * x_ij and Gurobi handles it as a second-order cone.
-                M = self._compute_big_m()
-                self.t_arc = self.model.addVars(self.n, self.n, lb=0.0, name="t_dist")
-                self.model.addConstrs((self.t_arc[i, j] == self.d[i, j] + M[i, j] * (1 - self.x[i, j])
-                                       for i in range(self.n) for j in range(self.n)), name="t_dist_def")
-                self.model.addConstrs((self.t_arc[i,j]**2 >= (self.p_x[i] - self.p_x[j])**2 + (self.p_y[i] - self.p_y[j])**2 for i in range(self.n) for j in range(self.n)), name="distance")
+                # Big-M-free activation of the distance cone:
+                #   ||p_i - p_j - (1 - x_ij)(c_i - c_j)|| <= d_ij + (1 - x_ij)(r_i + r_j).
+                # With x_ij = 1 it is ||p_i - p_j|| <= d_ij; with x_ij = 0 it is
+                # ||(p_i - c_i) - (p_j - c_j)|| <= d_ij + r_i + r_j, satisfied by
+                # d_ij = 0 whenever both points lie in their disks. It is valid
+                # on both disjuncts and convex, hence valid on their convex
+                # hull, and it implies the big-M form d_ij >= ||p_i - p_j|| -
+                # (||c_i - c_j|| + r_i + r_j)(1 - x_ij) by the triangle
+                # inequality, so the continuous relaxation is tighter. Written
+                # on w_ij = p_i - p_j - (1 - x_ij)(c_i - c_j) and t_ij = d_ij +
+                # (1 - x_ij)(r_i + r_j), both defined by linear equalities, so
+                # that the quadratic constraint ||w_ij||^2 <= t_ij^2 has no
+                # products of d, p and x and Gurobi handles it as a second-order
+                # cone.
+                arcs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j]
+                self.w_arc = self.model.addVars(arcs, 2, lb=-GRB.INFINITY, name="w_dist")
+                self.t_arc = self.model.addVars(arcs, lb=0.0, name="t_dist")
+                self.model.addConstrs((self.w_arc[i, j, 0] == self.p_x[i] - self.p_x[j]
+                                       - (1 - self.x[i, j]) * (self.data.centers[i][0] - self.data.centers[j][0])
+                                       for (i, j) in arcs), name="w_dist_x")
+                self.model.addConstrs((self.w_arc[i, j, 1] == self.p_y[i] - self.p_y[j]
+                                       - (1 - self.x[i, j]) * (self.data.centers[i][1] - self.data.centers[j][1])
+                                       for (i, j) in arcs), name="w_dist_y")
+                self.model.addConstrs((self.t_arc[i, j] == self.d[i, j]
+                                       + (1 - self.x[i, j]) * (self.data.radii[i] + self.data.radii[j])
+                                       for (i, j) in arcs), name="t_dist_def")
+                self.model.addConstrs((self.w_arc[i, j, 0]**2 + self.w_arc[i, j, 1]**2 <= self.t_arc[i, j]**2
+                                       for (i, j) in arcs), name="distance")
             elif self.model_type == 'seq':
                 self.model.addConstrs((self.d[k]**2 >= (self.p_x[k] - self.p_x[k+1])**2 + (self.p_y[k] - self.p_y[k+1])**2 for k in range(self.n - 1)), name="distance")
                 self.model.addConstr((self.d[self.n - 1]**2 >= (self.p_x[self.n - 1] - self.p_x[0])**2 + (self.p_y[self.n - 1] - self.p_y[0])**2), name="distance_wrap_around")
@@ -370,24 +388,35 @@ class CETSP_L2_Solver:
         
         elif constraint_type == 'distance':
             if self.model_type == 'arc':
-                xi_d = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_d")
-                eta_d = self.model.addVars(self.n, self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_d")
+                # (p_i - p_j - (1 - x_ij)(c_i - c_j), d_ij + (1 - x_ij) rho_ij) in
+                # P_eps(nu): the polyhedral version of the big-M-free activation
+                # of the exact model. The shift enters the base layer and the
+                # slack the last inequality of the tower, both linear, so no
+                # auxiliary variable is needed. Since the tower is an outer
+                # approximation, the slack uses rho_ij = (r_i + r_j) / cos(pi /
+                # 2^(nu+1)), the largest offset the approximated neighborhood
+                # constraint allows for ||p_i - c_i|| + ||p_j - c_j||, so that
+                # d_ij = 0 remains feasible on every unused arc; the exact set
+                # satisfies the constraint with the unscaled slack already, so
+                # the model is still a relaxation.
+                arcs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j]
+                scale = 1.0 / np.cos(np.pi / (2 ** (self.nu + 1)))
+                xi_d = self.model.addVars(arcs, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_d")
+                eta_d = self.model.addVars(arcs, self.nu + 1, vtype=GRB.CONTINUOUS, name="eta_d")
 
-                self.model.addConstrs(xi_d[i,j,0] >= self.p_x[i] - self.p_x[j] for i in range(self.n) for j in range(self.n))
-                self.model.addConstrs(xi_d[i,j,0] >= -self.p_x[i] + self.p_x[j] for i in range(self.n) for j in range(self.n))
-                self.model.addConstrs(eta_d[i,j,0] >= self.p_y[i] - self.p_y[j] for i in range(self.n) for j in range(self.n))
-                self.model.addConstrs(eta_d[i,j,0] >= -self.p_y[i] + self.p_y[j] for i in range(self.n) for j in range(self.n))
+                shift_x = {(i, j): self.data.centers[i][0] - self.data.centers[j][0] for (i, j) in arcs}
+                shift_y = {(i, j): self.data.centers[i][1] - self.data.centers[j][1] for (i, j) in arcs}
+                self.model.addConstrs(xi_d[i,j,0] >= self.p_x[i] - self.p_x[j] - (1 - self.x[i,j]) * shift_x[i,j] for (i, j) in arcs)
+                self.model.addConstrs(xi_d[i,j,0] >= -(self.p_x[i] - self.p_x[j] - (1 - self.x[i,j]) * shift_x[i,j]) for (i, j) in arcs)
+                self.model.addConstrs(eta_d[i,j,0] >= self.p_y[i] - self.p_y[j] - (1 - self.x[i,j]) * shift_y[i,j] for (i, j) in arcs)
+                self.model.addConstrs(eta_d[i,j,0] >= -(self.p_y[i] - self.p_y[j] - (1 - self.x[i,j]) * shift_y[i,j]) for (i, j) in arcs)
 
-                self.model.addConstrs(xi_d[i,j,k] == np.cos(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.sin(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
-                self.model.addConstrs(eta_d[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
-                self.model.addConstrs(eta_d[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
+                self.model.addConstrs(xi_d[i,j,k] == np.cos(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.sin(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for (i, j) in arcs for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_d[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for (i, j) in arcs for k in range(1, self.nu + 1))
+                self.model.addConstrs(eta_d[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for (i, j) in arcs for k in range(1, self.nu + 1))
 
-                # (p_i - p_j, d_ij + M_ij (1 - x_ij)) in P_eps(nu): the big-M
-                # activation enters the last inequality of the approximation
-                # directly, which is linear, so no auxiliary variable is needed.
-                M = self._compute_big_m()
-                self.model.addConstrs(xi_d [i,j,self.nu] <= self.d[i,j] + M[i,j] * (1 - self.x[i,j]) for i in range(self.n) for j in range(self.n))
-                self.model.addConstrs(eta_d[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[i,j,self.nu] for i in range(self.n) for j in range(self.n))
+                self.model.addConstrs(xi_d[i,j,self.nu] <= self.d[i,j] + scale * (self.data.radii[i] + self.data.radii[j]) * (1 - self.x[i,j]) for (i, j) in arcs)
+                self.model.addConstrs(eta_d[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[i,j,self.nu] for (i, j) in arcs)
 
             elif self.model_type == 'seq':
                 xi_d = self.model.addVars(self.n, self.nu + 1, vtype=GRB.CONTINUOUS, name="xi_d")
@@ -941,7 +970,7 @@ class CETSP_L2_Solver:
         """
         self._create_subtour_elimination_constraints()
         self._create_neighborhood_constraints()
-        self._create_distance_constraints()   # includes the big-M activation
+        self._create_distance_constraints()   # includes the big-M-free activation
 
     def _create_seq_formulation_specific_parts(self):
         """
@@ -974,22 +1003,6 @@ class CETSP_L2_Solver:
         self.model.addConstrs((u.sum(i, '*') - u.sum('*', i) == -1 for i in range(1, self.n)), name="subtour_elim_flow")
         self.model.addConstr((u.sum(0, '*') - u.sum('*', 0) == self.n - 1), name="subtour_elim_source")
         self.model.addConstrs((u[i, j] <= (self.n - 1) * self.x[i, j] for i in range(self.n) for j in range(self.n)), name="subtour_elim_capacity")
-
-    def _compute_big_m(self):
-        """
-        Computes the Big-M values for the linearization.
-        """
-        M = np.zeros((self.n, self.n))
-
-        scale = 1.0
-        if self.extended:
-            scale = 1.0 / np.cos(np.pi / (2 ** (self.nu + 1)))
-
-        for i in range(self.n):
-            for j in range(self.n):
-                dist_centers = np.sqrt((self.data.centers[i][0] - self.data.centers[j][0])**2 + (self.data.centers[i][1] - self.data.centers[j][1])**2)
-                M[i,j] = self.data.radii[i] * scale + dist_centers + self.data.radii[j] * scale
-        return M
 
     def _compute_distance_estimations(self):
         """
