@@ -100,7 +100,9 @@ CONFIGURATIONS = [
     ('ABF',             'arc',         False, False, None,               False),
     ('SBF',             'seq',         False, False, None,               False),
     ('PBF',             'perspective', False, False, None,               False),
-    ('ABF-D',           'arc',         True,  False, None,               False),
+    ('ABF-D-dual',      'arc',         True,  False, 'dual',             False),
+    ('ABF-D-enum',      'arc',         True,  False, 'enumerative',      False),
+    ('ABF-D-DE',        'arc',         True,  False, 'dual+enumerative', False),
     ('SBF-D-dual',      'seq',         True,  False, 'dual',             False),
     ('SBF-D-enum',      'seq',         True,  False, 'enumerative',      False),
     ('SBF-D-DE',        'seq',         True,  False, 'dual+enumerative', False),
@@ -112,7 +114,9 @@ CONFIGURATIONS = [
     ('ABF-A',           'arc',         False, True,  None,               False),
     ('SBF-A',           'seq',         False, True,  None,               False),
     ('PBF-A',           'perspective', False, True,  None,               False),
-    ('ABF-A-D',         'arc',         True,  True,  None,               False),
+    ('ABF-A-D-dual',    'arc',         True,  True,  'dual',             False),
+    ('ABF-A-D-enum',    'arc',         True,  True,  'enumerative',      False),
+    ('ABF-A-D-DE',      'arc',         True,  True,  'dual+enumerative', False),
     ('SBF-A-D-dual',    'seq',         True,  True,  'dual',             False),
     ('SBF-A-D-enum',    'seq',         True,  True,  'enumerative',      False),
     ('SBF-A-D-DE',      'seq',         True,  True,  'dual+enumerative', False),
@@ -140,25 +144,20 @@ def is_bracketing(model_type, extended, decomposition):
 
 def exact_tour_length(data, tour_arcs, mip_gap):
     """
-    Length of a given tour under the exact arc SOCP: the common yardstick.
+    Length of a given tour under the exact tour SOCP (subproblem (7)): the
+    common yardstick.
 
     Every formulation is scored with this evaluator rather than with its own.
     compute_upper_bound maps model_type back to the model's own family, so it
     would score a perspective tour with a perspective SOCP; if that formulation
-    is the one at fault, the measurement inherits the fault.
+    is the one at fault, the measurement inherits the fault. The tour SOCP is
+    used rather than the full ABF with x fixed, whose redundant activation
+    cones on the unused arcs are numerically degenerate (see build_tour_socp).
     """
     m = Model()
     m.setParam('OutputFlag', 0)
-    m.setParam('MIPGap', mip_gap)
     s = CETSP_L2_Solver(m, data, 'arc', symmetry_breaking=False)   # the tour is given; either orientation
-    s.cut_type = None
-    s.build()
-    active = set(tour_arcs)
-    for i in range(data.n):
-        for j in range(data.n):
-            v = 1.0 if (i, j) in active else 0.0
-            s.x[i, j].lb = v
-            s.x[i, j].ub = v
+    s.build_tour_socp(list(tour_arcs))
     m.optimize()
     return m.ObjVal if m.SolCount > 0 else None
 

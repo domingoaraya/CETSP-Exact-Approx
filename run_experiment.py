@@ -192,7 +192,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
         if decomposition:
             print("Using decomposition")
         if cut_type:
-            print(f"Using {cut_type} cuts for sequence decomposition")
+            print(f"Using {cut_type} cuts for the decomposition")
         if strengthen:
             print(f"Using DFJ strengthening")
         if optimize_coefficients:
@@ -254,6 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", type=str, nargs='+', default=['arc', 'seq', 'perspective'], choices=['arc', 'seq', 'perspective', 'BS'], help="List of model types to test.")
     parser.add_argument("--decomposition", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use decomposition (True/False).")
     parser.add_argument("--extended", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use extended formulation (True/False).")
+    parser.add_argument("--abf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for arc model decomposition.")
     parser.add_argument("--sbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for sequence model decomposition.")
     parser.add_argument("--pbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for perspective model decomposition.")
     parser.add_argument("--strengthen", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Use DFJ cut strengthening at root node (True/False).")
@@ -306,9 +307,15 @@ if __name__ == "__main__":
                     if strengthen_val and model_type_val not in ['arc', 'perspective']:
                         continue
 
-                    if decomposition_val and model_type_val in ['seq', 'perspective']:
+                    if decomposition_val:
                         # Determine which cuts to use based on the model type
-                        if model_type_val == 'seq':
+                        if model_type_val == 'arc':
+                            # The paper's ABF-D and ABF-A-D use enumerative cuts.
+                            if args.abf_cut_type is None:
+                                cuts_to_use = ['enumerative']
+                            else:
+                                cuts_to_use = args.abf_cut_type
+                        elif model_type_val == 'seq':
                             if args.sbf_cut_type is None:
                                 cuts_to_use = ['enumerative'] if extended_val else ['dual']
                             else:

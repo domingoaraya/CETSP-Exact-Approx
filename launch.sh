@@ -45,7 +45,7 @@ INSTANCE_CONFIGS=(
 
 # Solver configurations: "label|flags", in alphabetical order by label. Comment
 # out the ones you don't want to run. Lists every combination run_experiment.py
-# can generate (82):
+# can generate (98):
 # model x {A} x {D, cut type} x {S} x {OC} x {B}, with -S only for ABF/PBF,
 # -OC only for PBF-D with dual cuts, and -B (symmetry breaking, no reverse-tour
 # cuts) for all of them; each entry is followed by its -B variant. Each label
@@ -55,17 +55,33 @@ CONFIGS=(
   "ABF|--model_type arc --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
   "ABF-A|--model_type arc --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
   "ABF-A-B|--model_type arc --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-A-D|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  "ABF-A-D-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-A-D-S|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  "ABF-A-D-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
+  "ABF-A-D-DE|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking False"
+  "ABF-A-D-DE-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-A-D-DE-S|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking False"
+  "ABF-A-D-DE-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-A-D-dual|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual --symmetry_breaking False"
+  "ABF-A-D-dual-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-A-D-dual-S|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual --symmetry_breaking False"
+  "ABF-A-D-dual-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-A-D-enum|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking False"
+  "ABF-A-D-enum-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
+  "ABF-A-D-enum-S|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking False"
+  "ABF-A-D-enum-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
   "ABF-A-S|--model_type arc --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking False"
   "ABF-A-S-B|--model_type arc --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "ABF-B|--model_type arc --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-D|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
-  "ABF-D-B|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-D-S|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --symmetry_breaking False"
-  "ABF-D-S-B|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"
+  "ABF-D-DE|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking False"
+  "ABF-D-DE-B|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-D-DE-S|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking False"
+  "ABF-D-DE-S-B|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-D-dual|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type dual --symmetry_breaking False"
+  "ABF-D-dual-B|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-D-dual-S|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type dual --symmetry_breaking False"
+  "ABF-D-dual-S-B|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-D-enum|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking False"
+  "ABF-D-enum-B|--model_type arc --decomposition True --extended False --strengthen False --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
+  "ABF-D-enum-S|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking False"
+  "ABF-D-enum-S-B|--model_type arc --decomposition True --extended False --strengthen True --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
   "ABF-S|--model_type arc --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking False"
   "ABF-S-B|--model_type arc --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "BS|--model_type BS --symmetry_breaking False"

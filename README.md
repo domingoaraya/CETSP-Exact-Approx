@@ -39,8 +39,9 @@ Experiments can be customized using the following parameters:
 - `--model_type`: List of model types to test. Choices: `arc`, `seq`, `perspective`, `BS` (default: `arc` `seq` `perspective`).
 - `--decomposition`: Use decomposition. Choices: `True`, `False` (default: `False` `True`).
 - `--extended`: Use extended formulation. Choices: `True`, `False` (default: `False` `True`).
-- `--sbf_cut_type`: Cut type for sequence model decomposition. Choices: `dual`, `enumerative`, `dual+enumerative` (default: `enumerative` for SBF-A-D and `dual` for SBF-D).
-- `--pbf_cut_type`: Cut type for perspective model decomposition. Same choices and defaults as above.
+- `--abf_cut_type`: Cut type for arc model decomposition. Choices: `dual`, `enumerative`, `dual+enumerative` (default: `enumerative`, the paper's ABF-D and ABF-A-D). The dual cut comes from the dual of the tour SOCP restricted to the support of the incumbent, completed with zero dual variables on the other arcs.
+- `--sbf_cut_type`: Cut type for sequence model decomposition. Same choices (default: `enumerative` for SBF-A-D and `dual` for SBF-D).
+- `--pbf_cut_type`: Cut type for perspective model decomposition. Same choices and defaults as `--sbf_cut_type`.
 - `--strengthen`: Use DFJ cut strengthening at the root node. Only available for ABF and PBF. Choices: `True`, `False` (default: `False`).
 - `--optimize_coefficients`: Optimize the PBF dual cut coefficients. Only applies to perspective decompositions using dual cuts; other configurations are skipped. Choices: `True`, `False` (default: `False`).
 - `--threads`: Gurobi threads per model, applied to the master, the subproblems and the upper bound solve alike. 0 lets Gurobi choose, 1 forces a single thread (default: 0).

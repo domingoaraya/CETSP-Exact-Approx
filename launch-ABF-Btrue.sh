@@ -85,7 +85,7 @@ INSTANCE_CONFIGS=(
 
 # Solver configurations: "label|flags", in alphabetical order by label. Comment
 # out the ones you don't want to run. Lists every combination run_experiment.py
-# can generate (82):
+# can generate (98):
 # model x {A} x {D, cut type} x {S} x {OC} x {B}, with -S only for ABF/PBF,
 # -OC only for PBF-D with dual cuts, and -B (symmetry breaking, no reverse-tour
 # cuts) for all of them; each entry is followed by its -B variant. Each label
@@ -93,8 +93,12 @@ INSTANCE_CONFIGS=(
 # --amount_of_instances 0).
 CONFIGS=(
   "ABF-A-B|--model_type arc --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-A-D-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  "ABF-A-D-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
+  "ABF-A-D-DE-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-A-D-DE-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual+enumerative --symmetry_breaking True"
+  "ABF-A-D-dual-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-A-D-dual-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type dual --symmetry_breaking True"
+  "ABF-A-D-enum-B|--model_type arc --decomposition True --extended True --strengthen False --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
+  "ABF-A-D-enum-S-B|--model_type arc --decomposition True --extended True --strengthen True --optimize_coefficients False --abf_cut_type enumerative --symmetry_breaking True"
   "ABF-A-S-B|--model_type arc --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "ABF-B|--model_type arc --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking True"
   "ABF-S-B|--model_type arc --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"

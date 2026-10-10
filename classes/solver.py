@@ -69,7 +69,7 @@ class CETSP_L2_Solver:
             self._build_bs_master_model()
         elif self.decomposition:
             self._build_decomposition_model()
-            if self.model_type == 'perspective':
+            if self.model_type in ('arc', 'perspective'):
                 self._prepare_dual_cut_buffers()
         else:
             self._create_variables()
@@ -88,6 +88,37 @@ class CETSP_L2_Solver:
 
         if self.symmetry_breaking:
             self._create_symmetry_breaking_constraints()
+
+    def build_tour_socp(self, tour_arcs):
+        """
+        Builds the SOCP that prices a given tour (subproblem (7) of the paper):
+        one point per target in its disk, one distance per arc of the tour,
+        minimise the sum of distances. The tour may have either orientation.
+
+        Used to recompute the upper bound of an incumbent tour for the arc
+        family. Fixing x in the full ABF is not a substitute: with the big-M-
+        free activation, every unused arc (i, j) carries the redundant cone
+        ||(p_i - c_i) - (p_j - c_j)|| <= d_ij + r_i + r_j, which sits exactly
+        on its boundary whenever the two offsets are antiparallel on the disk
+        boundaries, a configuration optimal tours produce often. Those
+        degenerate cones let the barrier return points outside the disks by up
+        to 1e-3 (objective below the true length) at default tolerances, and
+        fail at tight ones. The tour SOCP has no such constraints.
+
+        Args:
+            tour_arcs (list): the arcs (i, j) of the tour.
+        """
+        self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
+        self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+        self._apply_arc_point_bounds(self.p_x, self.p_y)
+        self.tour_arcs = list(tour_arcs)
+        self.d = self.model.addVars(self.tour_arcs, vtype=GRB.CONTINUOUS, name="d")
+        # radii[i] == 0 targets are pinned to their center by _apply_arc_point_bounds
+        self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2
+                               for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
+        self.model.addConstrs((self.d[i, j]**2 >= (self.p_x[i] - self.p_x[j])**2 + (self.p_y[i] - self.p_y[j])**2
+                               for (i, j) in self.tour_arcs), name="distance")
+        self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
 
     def _create_symmetry_breaking_constraints(self):
         """
@@ -126,8 +157,8 @@ class CETSP_L2_Solver:
 
     def _prepare_dual_cut_buffers(self):
         """
-        Preallocates the perspective dual cut's variable list and C array. Only
-        the coefficients change between callbacks.
+        Preallocates the variable list and coefficient array of the arc and
+        perspective dual cuts. Only the coefficients change between callbacks.
         """
         pairs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j]
         self._cut_rows = np.array([i for i, j in pairs], dtype=np.intp)
@@ -523,10 +554,10 @@ class CETSP_L2_Solver:
             A tuple (sub_obj, duals). Every route follows the same contract:
             - solved to optimality: sub_obj = Q(x_sol), last_subproblem_status is None;
             - usable but weak (status SUBOPTIMAL with a solution on the dual
-              subproblems, with a finite ObjBound on the primal one): sub_obj is a
-              lower bound on Q, the cut built from it is valid, and
-              last_subproblem_status holds the Gurobi status so the caller can
-              tell the value is weak;
+              subproblems of the arc, sequence and perspective routes, with a
+              finite ObjBound on the primal BS one): sub_obj is a lower bound
+              on Q, the cut built from it is valid, and last_subproblem_status
+              holds the Gurobi status so the caller can tell the value is weak;
             - no usable information: (None, None), with last_subproblem_status set.
         """
         self.last_subproblem_status = None
@@ -535,40 +566,63 @@ class CETSP_L2_Solver:
         sub_model.setParam('Threads', self.threads)
 
         if self.model_type == 'arc':
-            #sub_model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
-            p_x = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
-            p_y = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
-            self._apply_arc_point_bounds(p_x, p_y)
-            tour_arcs = []
-            for i in range(self.n):
-                for j in range(self.n):
-                    if x_sol[i,j] > 0.5:
-                        tour_arcs.append((i,j))
-            
-            d = sub_model.addVars(tour_arcs, vtype=GRB.CONTINUOUS, name="d")
-            
-            sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
-            sub_model.addConstrs((d[i,j]**2 >= (p_x[i] - p_x[j])**2 + (p_y[i] - p_y[j])**2 for i,j in tour_arcs), name="distance")
+            # Dual of the SOCP that prices the tour, with the dual variables
+            # of the distance cones restricted to the support (every other
+            # arc has x = 0 and drops out of the dual objective, and its dual
+            # variables are set to zero when the cut is assembled):
+            #   max  sum_{(i,j) in S} (c_j - c_i).rho_ij - sum_i r_i tau_i
+            #   s.t. ||rho_ij|| <= 1,  ||rho_{prev(i),i} - rho_{i,next(i)}|| <= tau_i.
+            # rho_ij is the unit direction of segment (i, j) and tau_i the turn
+            # at node i: the objective is the tour length (weak duality is
+            # Cauchy-Schwarz on each cone, strong duality holds since the
+            # primal has a Slater point once p_i = c_i is substituted for the
+            # zero-radius targets, whose tau_i has no cost). Same program as
+            # the perspective route with gamma = -rho; the primal over the
+            # support is not solved because the dual is what the cut needs.
+            tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
+
+            nxt = {}
+            prv = {}
+            for i, j in tour_arcs:
+                nxt[i] = j
+                prv[j] = i
+
+            rho = sub_model.addVars(tour_arcs, 2, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="rho")
+            tau = sub_model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=0, name="tau")
+
+            sub_model.addConstrs((rho[i, j, 0]**2 + rho[i, j, 1]**2 <= 1.0 for (i, j) in tour_arcs), name="rho_norm")
+            sub_model.addConstrs(
+                ((rho[prv[i], i, 0] - rho[i, nxt[i], 0])**2 +
+                 (rho[prv[i], i, 1] - rho[i, nxt[i], 1])**2 <= tau[i]**2 for i in range(self.n)),
+                name="tau_bound"
+            )
 
             # Q = tour length - current_estimation on both the plain master
             # (current_estimation = sum E_ij x_ij) and the extended one (sum d).
-            sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
+            obj = LinExpr()
+            for i, j in tour_arcs:
+                obj.addTerms([self.data.centers[j][0] - self.data.centers[i][0],
+                              self.data.centers[j][1] - self.data.centers[i][1]],
+                             [rho[i, j, 0], rho[i, j, 1]])
+            for i in range(self.n):
+                obj.addTerms([-self.data.radii[i]], [tau[i]])
+            obj.addConstant(-current_estimation)
+
+            sub_model.setObjective(obj, GRB.MAXIMIZE)
             sub_model.optimize()
-            # Primal minimization: a suboptimal solve returns Q >= Q*, and the
-            # enumerative cut built from it would remove a feasible point. Its
-            # bound ObjBound <= Q*, however, is safe: the enumerative cut with
-            # Q_lb in place of Q is valid (weaker), and it is still violated
-            # whenever theta_hat < Q_lb.
-            if sub_model.status == GRB.OPTIMAL:
-                return self._subproblem_objective(sub_model), {}
-            self.last_subproblem_status = sub_model.status
-            if sub_model.status == GRB.SUBOPTIMAL:
-                try:
-                    q_lb = float(sub_model.ObjBound)
-                except Exception:
-                    q_lb = None
-                if q_lb is not None and np.isfinite(q_lb):
-                    return q_lb, {}
+
+            # Dual maximization: any feasible dual point gives a valid cut whose
+            # value at x_hat is a lower bound on Q*, so a suboptimal solve with
+            # a solution is still usable (the cut is just weaker).
+            if sub_model.status != GRB.OPTIMAL:
+                self.last_subproblem_status = sub_model.status
+            if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
+                duals = {
+                    'rho': {(i, j, dim): rho[i, j, dim].X for i, j in tour_arcs for dim in range(2)},
+                    'tau': np.array([tau[i].X for i in range(self.n)]),
+                    'arcs': tour_arcs
+                }
+                return self._subproblem_objective(sub_model), duals
             return None, None
 
 
@@ -776,24 +830,57 @@ class CETSP_L2_Solver:
         sub_obj = max(0.0, sub_obj)
 
         if self.model_type == 'arc':
+            tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
 
-            tour_arcs = []
-            for i in range(self.n):
-                for j in range(self.n):
-                    if x_sol[i,j] > 0.5:
-                        tour_arcs.append((i,j))
-            
-            delta = LinExpr()
-            delta_rev = LinExpr()
-            for i,j in tour_arcs:
-                delta += (1 - self.x[i,j])
-                delta_rev += (1 - self.x[j,i])
+            if 'dual' in cut_type:
+                # Dual cut with the trivial completion (zero dual variables on
+                # the arcs outside the support S of x_hat). On any tour x,
+                #   length(x) >= sum_{a in S} x_a [(c_j - c_i).rho_a + sigma_a]
+                #                - sum_{a in S} sigma_a - sum_i r_i tau_i,
+                # sigma_a = r_i + r_j: each arc of S that x drops pays its dual
+                # length plus the slack of the activation constraint, and the
+                # arcs x adds pay nothing beyond their estimate. Tight at x_hat
+                # (the right-hand side is the dual objective there). The dual
+                # cut is theta >= length - estimate, with the estimate sum E x
+                # on the plain master and sum d on the extended one.
+                #
+                # Reverse tour: rho'_{ji} = -rho_ij with the same tau is
+                # feasible and optimal for the reversed support (the turn
+                # vectors change sign, not norm, and the objective is
+                # unchanged), so the reverse cut has the transposed
+                # coefficients and the same constant.
+                rho = duals['rho']
+                tau = duals['tau']
+                C = self._C_buf
+                C.fill(0.0)
+                const = -float(sum(self.data.radii[i] * tau[i] for i in range(self.n)))
+                for i, j in tour_arcs:
+                    sigma = self.data.radii[i] + self.data.radii[j]
+                    C[i, j] = ((self.data.centers[j][0] - self.data.centers[i][0]) * rho[i, j, 0]
+                               + (self.data.centers[j][1] - self.data.centers[i][1]) * rho[i, j, 1]
+                               + sigma)
+                    const -= sigma
 
-            self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
-            n_added += 1
-            if add_reverse:
-                self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+                for coef_mat in ((C, C.T) if add_reverse else (C,)):
+                    if not self.extended:
+                        coeffs = (coef_mat - self.estimation)[self._cut_rows, self._cut_cols].tolist()
+                    else:
+                        coeffs = coef_mat[self._cut_rows, self._cut_cols].tolist() + self._cut_tail
+                    self.model.cbLazy(LinExpr(coeffs, self._cut_vars) + const <= self.theta)
+                    n_added += 1
+
+            if 'enumerative' in cut_type:
+                delta = LinExpr()
+                delta_rev = LinExpr()
+                for i, j in tour_arcs:
+                    delta += (1 - self.x[i, j])
+                    delta_rev += (1 - self.x[j, i])
+
+                self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
                 n_added += 1
+                if add_reverse:
+                    self.model.cbLazy(-(sub_obj/3)*delta_rev + sub_obj <= self.theta)
+                    n_added += 1
 
         elif self.model_type == 'seq':
             if 'dual' in cut_type:

@@ -25,7 +25,7 @@ class CETSPModel:
             decomposition (bool): Whether to use Benders decomposition. Defaults to False.
             extended (bool): Whether to use the extended formulation for the L2 norm. Defaults to False.
             nu (int, optional): The parameter for the extended formulation. Defaults to 3.
-            cut_type (str, optional): The type of cut for decompositions ('dual', 'enumerative' or 'dual+enumerative'). Defaults to 'enumerative'.
+            cut_type (str, optional): The type of cut for the arc, sequence and perspective decompositions ('dual', 'enumerative' or 'dual+enumerative'). Defaults to 'enumerative'.
             strengthen (bool): Whether to use DFJ cut separation at the root node. Defaults to False.
             optimize_coefficients (bool): Whether to minimise the perspective dual cut's coefficients on arcs outside the support, instead of the trivial completion. Only affects 'perspective' with dual cuts. Defaults to False.
             threads (int, optional): Gurobi threads for every model built by this run, including the subproblems and the upper bound solve. 0 lets Gurobi choose. Defaults to 0.
@@ -436,17 +436,26 @@ class CETSPModel:
         # x is fixed to the incumbent tour, which may have either orientation:
         # no symmetry breaking here.
         ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads, symmetry_breaking=False)
-        ub_solver.build()
 
-        # Fix the integer variables to the rounded incumbent: MIP values can
-        # sit up to IntFeasTol away from 0/1, and a binary with fractional
-        # equal bounds would be infeasible.
-        for i in range(self.data.n):
-            for j in range(self.data.n):
-                v = 1.0 if x_sol[i, j] > 0.5 else 0.0
-                ub_solver.x[i, j].lb = v
-                ub_solver.x[i, j].ub = v
-        
+        if model_type_ub == 'arc':
+            # The tour SOCP over the support (rounded incumbent: MIP values
+            # can sit up to IntFeasTol away from 0/1). See build_tour_socp
+            # for why the full ABF with x fixed is not used.
+            tour_arcs = [(i, j) for i in range(self.data.n) for j in range(self.data.n)
+                         if i != j and x_sol[i, j] > 0.5]
+            ub_solver.build_tour_socp(tour_arcs)
+        else:
+            ub_solver.build()
+
+            # Fix the integer variables to the rounded incumbent: MIP values can
+            # sit up to IntFeasTol away from 0/1, and a binary with fractional
+            # equal bounds would be infeasible.
+            for i in range(self.data.n):
+                for j in range(self.data.n):
+                    v = 1.0 if x_sol[i, j] > 0.5 else 0.0
+                    ub_solver.x[i, j].lb = v
+                    ub_solver.x[i, j].ub = v
+
         ub_model.optimize()
 
         # Any feasible point of the fixed-sequence problem is a valid upper bound;
@@ -457,10 +466,13 @@ class CETSPModel:
             arcs = []
             points = {}
 
-            # Retrieve x solution from ub_model
-            ub_x_sol = ub_model.getAttr('X', ub_solver.x)
+            if model_type_ub == 'arc':
+                arcs = list(ub_solver.tour_arcs)
+            else:
+                # Retrieve x solution from ub_model
+                ub_x_sol = ub_model.getAttr('X', ub_solver.x)
 
-            if model_type_ub in ['arc', 'perspective']:
+            if model_type_ub == 'perspective':
                 for i in range(self.data.n):
                     for j in range(self.data.n):
                         if ub_x_sol[i, j] > 0.5:
@@ -545,9 +557,18 @@ class CETSPModel:
                               file=sys.stderr, flush=True)
                     self.upper_bound = ub_true
             else:
-                # Monolithic SOCP models: the model objective is the true UB.
+                # Monolithic SOCP models: the model objective is the true UB,
+                # up to solver tolerances. For ABF the tolerance is not
+                # harmless (see build_tour_socp), so its incumbent is priced
+                # again by the tour SOCP and the true length is reported.
                 self.upper_bound = self.model.ObjVal
                 self._extract_arcs_and_points()
+                if self.model_type == 'arc':
+                    ub_true, _, plot_points = self.compute_upper_bound(x_sol)
+                    if ub_true != float('inf'):
+                        self.upper_bound = ub_true
+                        if plot_points:
+                            self.points = plot_points
 
             # Recalculate gap robustly
             if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
