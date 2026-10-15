@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ---------------------------------------------------------------- parameters
-N_LIST=(10 15 20)
+N_LIST=(10 15 20 25)
 INSTANCES=5
 TIME_LIMIT=1800
 CPUSETS=(
@@ -102,37 +102,21 @@ CONFIGS=(
   "ABF-S-B|--model_type arc --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "BS-B|--model_type BS --symmetry_breaking True"
   "PBF-A-B|--model_type perspective --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  #"PBF-A-D-DE-B|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-A-D-DE-OC-B|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-A-D-DE-S-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-A-D-DE-S-OC-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-A-D-dual-B|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking True"
   "PBF-A-D-dual-OC-B|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking True"
-  #"PBF-A-D-dual-S-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking True"
   "PBF-A-D-dual-S-OC-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking True"
   "PBF-A-D-enum-B|--model_type perspective --decomposition True --extended True --strengthen False --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-A-D-enum-S-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-A-S-B|--model_type perspective --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "PBF-B|--model_type perspective --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  #"PBF-D-DE-B|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-D-DE-OC-B|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-D-DE-S-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-D-DE-S-OC-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients True --pbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"PBF-D-dual-B|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking True"
   "PBF-D-dual-OC-B|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking True"
-  #"PBF-D-dual-S-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type dual --symmetry_breaking True"
   "PBF-D-dual-S-OC-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking True"
   "PBF-D-enum-B|--model_type perspective --decomposition True --extended False --strengthen False --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-D-enum-S-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-S-B|--model_type perspective --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "SBF-A-B|--model_type seq --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  #"SBF-A-D-DE-B|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type dual+enumerative --symmetry_breaking True"
   "SBF-A-D-dual-B|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type dual --symmetry_breaking True"
   "SBF-A-D-enum-B|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type enumerative --symmetry_breaking True"
   "SBF-B|--model_type seq --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking True"
-  #"SBF-D-DE-B|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type dual+enumerative --symmetry_breaking True"
-  #"SBF-D-dual-B|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type dual --symmetry_breaking True"
-  #"SBF-D-enum-B|--model_type seq --decomposition True --extended False --strengthen False --optimize_coefficients False --sbf_cut_type enumerative --symmetry_breaking True"
 )
 
 # ------------------------------------------------------------------ queue
@@ -164,7 +148,7 @@ echo "total: $(wc -l < "$QUEUE") of $total jobs pending  (each job = $INSTANCES 
 
 # Generate every instance before launching, so that several processes never
 # write the same file at once. Same formulas as run_experiment.py.
-python - "$INSTANCES" "${N_LIST[@]}" -- "${INSTANCE_CONFIGS[@]}" <<'PY'
+python3 - "$INSTANCES" "${N_LIST[@]}" -- "${INSTANCE_CONFIGS[@]}" <<'PY'
 import os, sys
 from utils.instance_handler import create_and_save_instance
 k = int(sys.argv[1]); sep = sys.argv.index('--')
@@ -197,7 +181,7 @@ worker() {  # worker <cpuset>
     local log="logs/n${n}/${label}__r${rm}_s${sg}.log"
     mkdir -p "$(dirname "$out")" "logs/n${n}" "logs/gurobi/n${n}"
     echo "[$(date '+%F %T')] $tag -> n=$n $label r=$rm sigma=$sg"
-    taskset -c "$cpuset" python -u run_experiment.py \
+    taskset -c "$cpuset" python3 -u run_experiment.py \
         --n_nodes "$n" --r_mean "$rm" --sigma "$sg" --amount_of_instances "$INSTANCES" \
         --time_limit "$TIME_LIMIT" --threads "$THREADS" --verbosity low \
         --gurobi_log_dir "logs/gurobi/n${n}" --outfile "$out" $flags > "$log" 2>&1 \
