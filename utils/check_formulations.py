@@ -140,25 +140,20 @@ def is_bracketing(model_type, extended, decomposition):
 
 def exact_tour_length(data, tour_arcs, mip_gap):
     """
-    Length of a given tour under the exact arc SOCP: the common yardstick.
+    Length of a given tour under the exact tour SOCP (subproblem (7)): the
+    common yardstick.
 
     Every formulation is scored with this evaluator rather than with its own.
     compute_upper_bound maps model_type back to the model's own family, so it
     would score a perspective tour with a perspective SOCP; if that formulation
-    is the one at fault, the measurement inherits the fault.
+    is the one at fault, the measurement inherits the fault. The tour SOCP is
+    used rather than the full ABF with x fixed: it is smaller and free of the
+    big-M activations of the unused arcs (see build_tour_socp).
     """
     m = Model()
     m.setParam('OutputFlag', 0)
-    m.setParam('MIPGap', mip_gap)
     s = CETSP_L2_Solver(m, data, 'arc', symmetry_breaking=False)   # the tour is given; either orientation
-    s.cut_type = None
-    s.build()
-    active = set(tour_arcs)
-    for i in range(data.n):
-        for j in range(data.n):
-            v = 1.0 if (i, j) in active else 0.0
-            s.x[i, j].lb = v
-            s.x[i, j].ub = v
+    s.build_tour_socp(list(tour_arcs))
     m.optimize()
     return m.ObjVal if m.SolCount > 0 else None
 

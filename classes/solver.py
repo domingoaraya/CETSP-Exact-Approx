@@ -89,6 +89,35 @@ class CETSP_L2_Solver:
         if self.symmetry_breaking:
             self._create_symmetry_breaking_constraints()
 
+    def build_tour_socp(self, tour_arcs):
+        """
+        Builds the SOCP that prices a given tour (subproblem (7) of the paper):
+        one point per target in its disk, one distance per arc of the tour,
+        minimise the sum of distances. The tour may have either orientation.
+
+        Used to recompute the upper bound of an incumbent tour for the arc
+        family, instead of fixing x in the full ABF. The full model carries
+        n(n-1) distance cones and a big-M activation on every unused arc; the
+        tour SOCP has n + |tour| cones and no activation, so it is smaller and
+        its objective is the tour length up to plain conic tolerances, without
+        the big-M amplifying the feasibility tolerance (the MISOCP objective
+        has been observed up to 4e-4 below the true length of its own tour).
+
+        Args:
+            tour_arcs (list): the arcs (i, j) of the tour.
+        """
+        self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
+        self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
+        self._apply_arc_point_bounds(self.p_x, self.p_y)
+        self.tour_arcs = list(tour_arcs)
+        self.d = self.model.addVars(self.tour_arcs, vtype=GRB.CONTINUOUS, name="d")
+        # radii[i] == 0 targets are pinned to their center by _apply_arc_point_bounds
+        self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2
+                               for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
+        self.model.addConstrs((self.d[i, j]**2 >= (self.p_x[i] - self.p_x[j])**2 + (self.p_y[i] - self.p_y[j])**2
+                               for (i, j) in self.tour_arcs), name="distance")
+        self.model.setObjective(self.d.sum(), GRB.MINIMIZE)
+
     def _create_symmetry_breaking_constraints(self):
         """
         Removes the reversal symmetry: every tour and its reverse have the same
