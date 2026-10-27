@@ -2,25 +2,23 @@ import matplotlib.pyplot as plt
 
 class Plotter:
     """
-    A class for visualizing the solution of a CETSP instance.
+    Plots the disks and the tour of a solved CETSPModel.
     """
 
     def __init__(self, model):
         """
-        Initializes the Plotter.
-
         Args:
-            model (CETSPModel): The solved CETSPModel object.
+            model (CETSPModel): solved model.
         """
         self.model = model
         self.data = model.data
 
     def plot_solution(self, file_path=None):
         """
-        Generates and saves a plot of the CETSP solution.
+        Draws the solution and shows it; also saves it to file_path if given.
 
         Args:
-            file_path (str, optional): The path to save the plot image. Defaults to None.
+            file_path (str): output image path.
         """
         fig, ax = plt.subplots()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Merges the per-triple CSVs into one file per n (Results/n<n>/experiment_results_n<n>.csv)
+# Merges the per-job CSVs into one file per n (Results/n<n>/experiment_results_n<n>.csv)
 # and one global file (Results/experiment_results_all.csv), with a single header.
 cd "$(dirname "$0")"
 all="Results/experiment_results_all.csv"; : > "$all"; hdr_done=0

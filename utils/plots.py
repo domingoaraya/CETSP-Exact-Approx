@@ -3,7 +3,7 @@
 Every function takes the tidy frame produced by :mod:`utils.results` plus a
 list of formulation labels, and reads the axis extents off the data: the time
 axis spans the inferred time limit, the gap axis the observed gaps, and the
-colours are assigned per formulation base for any number of series.  No
+colors are assigned per formulation base for any number of series.  No
 function assumes a particular formulation set, number of panels, or grid of
 instance sizes.
 
@@ -39,7 +39,7 @@ from utils.results import (INSTANCE_KEY, common_instances, formulations_in,
                            parse_formulation, warn_on_uneven_coverage)
 
 # --------------------------------------------------------------------------
-# Colours
+# Colors
 # --------------------------------------------------------------------------
 
 #: One hue per formulation base.  ABF and SBF keep the hues used in the
@@ -69,9 +69,9 @@ def _lightness_variants(hex_color, count):
 
 
 def series_colors(formulations):
-    """Assign a colour to each label: hue by base, lightness by variant.
+    """Assign a color to each label: hue by base, lightness by variant.
 
-    Works for any number of series, unlike a fixed ten-colour qualitative
+    Works for any number of series, unlike a fixed ten-color qualitative
     map, and keeps a base's variants visually grouped.
     """
     bases, unknown = [], []
@@ -252,7 +252,7 @@ def profile_axes(ax, df, formulations, labels=None, colors=None,
     # Axis furniture.
     if time_scale == 'log':
         # Decades crowd together near zero once mapped, so thin them from the
-        # right, which keeps the time limit itself labelled.
+        # right, which keeps the time limit itself labeled.
         decades = [t for t in (0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0,
                                10000.0) if t < time_limit]
         candidates = np.array(decades + [time_limit])

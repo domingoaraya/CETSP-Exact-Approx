@@ -7,28 +7,28 @@ from classes.data_handling import CETSPData
 from classes.solver import CETSP_L2_Solver
 
 class CETSPModel:
+    """
+    Solves a CETSP instance with one of the formulations: builds the model,
+    runs the branch-and-cut (with the decomposition callbacks) or the BS
+    refinement loop, and reports bounds, gap and solution.
+    """
     # Number of subproblem failures reported per instance before going quiet
     SUBPROBLEM_WARNINGS = 3
-    """
-    A class to represent and solve a Close Enough Traveling Salesperson Problem (CETSP).
-    This class orchestrates the data handling, model building, and optimization process.
-    """
 
     def __init__(self, data: CETSPData, model_type: str, decomposition: bool = False, extended: bool = False, nu: int = 3, cut_type: str = 'enumerative', strengthen: bool = False,
                  optimize_coefficients: bool = False, threads: int = 0, symmetry_breaking: bool = True):
         """
-        Initializes the CETSPModel.
-
         Args:
-            data (CETSPData): The data for the CETSP instance.
-            model_type (str): The type of model to build ('arc', 'seq', 'perspective', or 'BS').
-            decomposition (bool): Whether to use Benders decomposition. Defaults to False.
-            extended (bool): Whether to use the extended formulation for the L2 norm. Defaults to False.
-            nu (int, optional): The parameter for the extended formulation. Defaults to 3.
-            cut_type (str, optional): The type of cut for decompositions ('dual', 'enumerative' or 'dual+enumerative'). Defaults to 'enumerative'.
-            strengthen (bool): Whether to use DFJ cut separation at the root node. Defaults to False.
-            optimize_coefficients (bool): Whether to minimise the perspective dual cut's coefficients on arcs outside the support, instead of the trivial completion. Only affects 'perspective' with dual cuts. Defaults to False.
-            threads (int, optional): Gurobi threads for every model built by this run, including the subproblems and the upper bound solve. 0 lets Gurobi choose. Defaults to 0.
+            data (CETSPData): instance data.
+            model_type (str): 'arc' (ABF), 'seq' (SBF), 'perspective' (PBF) or 'BS'.
+            decomposition (bool): use the decomposition instead of the full model.
+            extended (bool): use the polyhedral approximation of the cones.
+            nu (int): approximation parameter of the extended models.
+            cut_type (str): decomposition cuts: 'dual', 'enumerative' or 'dual+enumerative'.
+            strengthen (bool): separate DFJ cuts at the root node (arc and perspective).
+            optimize_coefficients (bool): optimize the PBF dual cut coefficients (PBF with dual cuts only).
+            threads (int): Gurobi threads for every model of the run; 0 lets Gurobi choose.
+            symmetry_breaking (bool): fix the tour orientation and skip the reverse-tour cuts.
         """
         self.data = data
         self.model_type = model_type
@@ -61,14 +61,14 @@ class CETSPModel:
 
     def build(self):
         """
-        Builds the optimization model.
+        Removes redundant targets and builds the model.
         """
         self.data.eliminate_redundancies()
         self.solver = CETSP_L2_Solver(self.model, self.data, self.model_type, self.decomposition, self.extended, self.nu, self.optimize_coefficients,
                                       threads=self.threads, symmetry_breaking=self.symmetry_breaking)
         self.solver.build()
 
-        # Initialize NetworkX graph for DFJ separation
+        # Flow network for the DFJ separation
         if self.strengthen and self.model_type in ['arc', 'perspective']:
             n = self.data.n
             self.G = nx.DiGraph()
@@ -80,36 +80,32 @@ class CETSPModel:
 
     def optimize(self, time_limit: int = 600, max_iterations: int = 5):
         """
-        Solves the optimization model.
+        Solves the model.
 
         Args:
-            time_limit (int, optional): The time limit for the solver in seconds. Defaults to 600.
-            max_iterations (int, optional): Maximum cell refinement iterations for BS. Defaults to 5.
+            time_limit (int): time limit in seconds.
+            max_iterations (int): cell refinement iterations of BS.
         """
-        # Wall-clock time of the whole solve, for every formulation: the
-        # branch-and-cut with its callbacks and subproblems, the BS refinement
-        # loop, and the exact SOCP that recomputes the upper bound.
+        # Wall-clock time of the whole solve, including callbacks, the BS
+        # refinement loop and the upper-bound SOCP
         start_time = time.time()
         try:
             if self.model_type == 'BS':
                 self.optimize_bs(time_limit=time_limit, max_iterations=max_iterations)
             else:
                 self.model.setParam('TimeLimit', time_limit)
-                # PreCrush is required for cbCut() to work with presolved model
+                # cbCut needs PreCrush; cbLazy needs LazyConstraints
                 if self.strengthen and self.model_type in ['arc', 'perspective']:
                     self.model.Params.PreCrush = 1
-
                 if self.decomposition:
-                    # LazyConstraints is only needed for cbLazy (decomposition/Benders cuts)
                     self.model.Params.LazyConstraints = 1
 
                 self.model.optimize(self._unified_callback)
                 self._retrieve_solution()
 
         except Exception as e:
-            # stderr and flush: stdout is block-buffered when redirected to a
-            # log file, so a message printed there is only written when the
-            # process exits, and is lost if it crashes.
+            # stderr with flush: stdout is block-buffered when redirected to a
+            # file and is lost if the process crashes
             print(f"An error occurred during optimization: {e}", file=sys.stderr, flush=True)
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
@@ -118,24 +114,23 @@ class CETSPModel:
 
     def optimize_bs(self, time_limit: int = 600, max_iterations: int = 5):
         """
-        Solves the CETSP using the Behdani & Smith (BS) cell refinement outer loop.
+        Solves the instance with the BS decomposition and its cell refinement loop.
 
         Args:
-            time_limit (int, optional): Total time limit in seconds. Defaults to 600.
-            max_iterations (int, optional): Maximum cell refinement iterations. Defaults to 5.
+            time_limit (int): total time limit in seconds.
+            max_iterations (int): cell refinement iterations.
         """
         start_time = time.time()
         self.bs_history = []
 
-        # Build Master Problem outside loop so SECs and Benders cuts persist.
-        # build() eliminates redundancies, which renumbers the targets, so the
-        # cells must be discretised after it or they describe the wrong disks.
+        # Build the master once. The cells must be discretized after build(),
+        # which renumbers the targets when it removes redundant ones.
         if self.solver is None:
             self.build()
         self.data.initialize_bs_cells()
         self.model.Params.LazyConstraints = 1
 
-        # Keep the best bound seen; an iteration that runs out of time reports a weaker one.
+        # Best bound over the iterations; an iteration cut short by the time limit reports a weaker one
         best_bound = -float('inf')
 
         for iteration in range(max_iterations):
@@ -157,17 +152,17 @@ class CETSPModel:
 
             x_sol = self.model.getAttr('X', self.solver.x)
             
-            # Invariant Check: Subtours must be eliminated by lazy constraints in callback
+            # Subtours are eliminated by the lazy constraints of the callback
             subtours = self._find_subtours(x_sol)
             assert len(subtours) == 1, "Numerical error: Invalid sequence bypassed the Benders callback."
 
-            # Re-solve subproblem to extract active cell flow paths f_sol
+            # Re-solve the subproblem to get the active cell flow f_sol
             current_estimation = self.model.objVal - self.solver.theta.X
             sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
 
 
             if sub_obj is None:
-                # Without a solved subproblem there is no f_sol to refine cells from.
+                # No f_sol to refine the cells from
                 self._record_subproblem_failure("optimize_bs initial subproblem")
                 break
 
@@ -179,7 +174,6 @@ class CETSPModel:
                 active_cells.add(delta)
                 active_cells.add(sigma)
 
-            # Telemetry recording
             self.bs_history.append({
                 'iteration': iteration,
                 'runtime': time.time() - start_time,
@@ -191,10 +185,9 @@ class CETSPModel:
             if not active_cells:
                 break
 
-            # Refine active cells
             self.data.refine_bs_cells(list(active_cells))
 
-            # Re-solve subproblem using the newly tightened geometry
+            # Re-solve on the refined cells; a violated cut is kept in the model
             refined_sub_obj, refined_duals = self.solver._solve_subproblem(x_sol, current_estimation)
 
             if refined_sub_obj is None:
@@ -234,13 +227,7 @@ class CETSPModel:
 
     def _find_subtours(self, x_sol):
         """
-        Finds all subtours (connected components) in the binary solution x_sol.
-        
-        Args:
-            x_sol (dict): Binary arc solution mapping (i, j) to 0 or 1.
-
-        Returns:
-            list: List of sets, where each set contains node indices of a subtour.
+        Returns the cycles of the arc solution x_sol as a list of node sets.
         """
         adj = {i: [] for i in range(self.data.n)}
         for i in range(self.data.n):
@@ -270,8 +257,8 @@ class CETSPModel:
 
     def _record_subproblem_failure(self, context):
         """
-        Permanent. Counts a subproblem failure and prints a one-time (per
-        model instance) console warning.
+        Counts a subproblem failure and reports the first SUBPROBLEM_WARNINGS
+        of them on stderr.
         """
         self.subproblem_failures += 1
         status = getattr(self.solver, 'last_subproblem_status', None)
@@ -288,12 +275,10 @@ class CETSPModel:
 
     def _unified_callback(self, model, where):
         """
-        Gurobi callback for lazy constraints (MIPSOL) and DFJ user cuts (MIPNODE).
-
-        gurobipy swallows exceptions raised inside a callback, so one raised
-        while separating an incumbent would let it through silently. The MIPSOL
-        branch is therefore guarded: an exception is recorded as a subproblem
-        failure, the same outcome as a subproblem that returns nothing.
+        Gurobi callback: lazy cuts at MIPSOL, root bound and DFJ user cuts at
+        MIPNODE. gurobipy swallows exceptions raised inside a callback, so an
+        exception while separating an incumbent is recorded as a subproblem
+        failure instead of silently letting the incumbent through.
         """
         if where == GRB.Callback.MIPSOL:
             try:
@@ -305,89 +290,74 @@ class CETSPModel:
             self._mipnode_callback(model)
 
     def _mipsol_callback(self, model):
-        """Lazy separation of an integer incumbent (decomposition and BS)."""
-        # Only run subproblem / Benders logic for decomposition or BS models
+        """Lazy separation of an integer incumbent (decompositions and BS)."""
         if self.decomposition or self.model_type == 'BS':
             x_sol = model.cbGetSolution(self.solver.x)
 
-            # 1. Subtour Check FIRST for BS model
+            # BS: subtour elimination first; the subproblem needs a single cycle
             if self.model_type == 'BS':
                 subtours = self._find_subtours(x_sol)
                 if len(subtours) > 1:
                     for S in subtours:
                         model.cbLazy(quicksum(self.solver.x[i, j] for i in S for j in S) <= len(S) - 1)
                         self.dfj_cuts += 1
-                    return  # EXIT IMMEDIATELY - Do not run subproblem on disconnected tours
+                    return
 
-            # 2. Subproblem Execution (Only reached if tour is fully connected)
-            # current_estimation is the incumbent's objective without theta
-            # (sum E x on the plain arc/perspective masters, sum d on the
-            # extended ones, 0 on the plain sequence master), so the
-            # subproblem returns Q = tour length - current_estimation and the
-            # incumbent's objective is a valid upper bound iff theta_hat >= Q.
+            # The incumbent's objective is a valid upper bound iff theta_hat >= Q,
+            # with Q = tour length - (objective without theta)
             theta_hat = model.cbGetSolution(self.solver.theta)
             current_estimation = model.cbGet(GRB.Callback.MIPSOL_OBJ) - theta_hat
 
             sub_obj, duals = self.solver._solve_subproblem(x_sol, current_estimation)
-            # Weak means the value is only a lower bound on Q (suboptimal
-            # subproblem): the cut built from it is still valid.
+            # weak: sub_obj is only a lower bound on Q (suboptimal subproblem)
             weak = self.solver.last_subproblem_status is not None
 
-            # The same decision on every route. An incumbent is accepted (no
-            # violated lazy cut) only when theta_hat >= Q is certified; it is
-            # accepted unverified, and counted as a failure, when there is no
-            # Q to compare against or when only a weak bound is available and
-            # it does not separate the point. The reported upper bound is
-            # always recomputed from the tour in _retrieve_solution.
+            # An incumbent is accepted only when theta_hat >= Q is certified.
+            # Otherwise it is accepted unverified and counted as a failure; the
+            # reported upper bound is recomputed from the tour afterwards.
             if sub_obj is None:
                 self._record_subproblem_failure(
                     "MIPSOL callback, no subproblem solution, incumbent accepted unverified")
                 return
-            # Q >= 0 on the plain masters (tour length >= sum E over the
-            # tour); on the extended ones sum d can exceed the length, so
-            # a negative Q is legitimate there.
+            # Q >= 0 on the plain masters; on the extended ones sum d can
+            # exceed the tour length, so a negative Q is legitimate there
             if not self.extended and sub_obj < -1e-6 * max(1.0, abs(current_estimation)):
                 self._record_subproblem_failure(
                     f"MIPSOL callback, negative Q(x_hat)={sub_obj:.6g}, incumbent accepted unverified")
                 return
 
             if theta_hat < sub_obj - 1e-6:
-                # The cut's value at x_hat is sub_obj, so it removes the
-                # incumbent whether Q is exact or weak. Dual and/or
-                # enumerative cut for x_hat, plus the reverse-tour versions
-                # unless symmetry breaking makes them pointless.
+                # The cut is violated by the incumbent whether Q is exact or weak
                 self.cuts += self.solver._add_decomposition_cuts(x_sol, sub_obj, duals, self.cut_type)
             elif weak:
                 self._record_subproblem_failure(
                     "MIPSOL callback, weak cut not violated, incumbent accepted unverified")
 
     def _mipnode_callback(self, model):
-        """Root bound bookkeeping and DFJ user cuts at the root node."""
+        """Records the root bound and separates DFJ user cuts at the root node."""
         if model.cbGet(GRB.Callback.MIPNODE_NODCNT) == 0:
             self.root_bound = model.cbGet(GRB.Callback.MIPNODE_OBJBND)
 
-        # DFJ fractional separation at the root node
         if not (self.strengthen and self.model_type in ['arc', 'perspective']):
             return
 
-        # Only separate at the root node with an optimal relaxation
+        # Root node with an optimal relaxation only
         if (model.cbGet(GRB.Callback.MIPNODE_NODCNT) != 0 or
                 model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL):
             return
 
-        DFJ_TOP_K = 1  # Number of most-violated DFJ cuts to inject per callback
+        DFJ_TOP_K = 1  # most violated cuts added per callback
 
         n = self.data.n
         x_frac = model.cbGetNodeRel(self.solver.x)
 
-        # Bulk-update edge capacities from fractional solution
         capacities = {
             (i, j): x_frac[i, j]
             for i in range(n) for j in range(n) if i != j
         }
         nx.set_edge_attributes(self.G, capacities, 'capacity')
 
-        # Find all violated subsets via min s-t cuts from depot (s=0)
+        # Violated cut-set inequalities via min s-t cuts from the depot
         violated = []
         for t in range(1, n):
             cut_value, partition = nx.minimum_cut(self.G, 0, t, capacity='capacity')
@@ -399,16 +369,14 @@ class CETSPModel:
         if not violated:
             return
 
-        # Deduplicate identical subsets, keeping max violation
         unique = {}
         for S, viol in violated:
             if S not in unique or viol > unique[S]:
                 unique[S] = viol
 
-        # Top-K filtering: pick the most violated unique subsets
         top_k = sorted(unique.items(), key=lambda item: item[1], reverse=True)[:DFJ_TOP_K]
 
-        # Inject DFJ cut-set inequalities: sum_{i in S, j not in S} x_{ij} >= 1
+        # sum_{i in S, j not in S} x_ij >= 1
         N = set(range(n))
         for S, _ in top_k:
             S_complement = N - S
@@ -422,33 +390,30 @@ class CETSPModel:
 
     def compute_upper_bound(self, x_sol):
         """
-        Computes an upper bound for the solution by solving the model with fixed integer variables.
+        Prices the tour of an integer solution with the exact SOCP: the tour
+        SOCP for the arc family and BS, the full model with x fixed otherwise.
 
         Args:
-            x_sol (dict): A dictionary mapping the integer variables to their solution values.
-        
+            x_sol (dict): values of the x variables.
+
         Returns:
-            tuple: A tuple containing (upper_bound_value, arcs, points), or (float('inf'), None, None) if no solution is found.
+            (value, arcs, points), or (inf, None, None) if the SOCP fails.
         """
         ub_model = Model("UB_Model")
         ub_model.setParam('OutputFlag', 0)
         model_type_ub = 'perspective' if self.model_type == 'perspective' else ('arc' if self.model_type in ['arc', 'BS'] else 'seq')
-        # x is fixed to the incumbent tour, which may have either orientation:
-        # no symmetry breaking here.
+        # The tour may have either orientation: no symmetry breaking here
         ub_solver = CETSP_L2_Solver(ub_model, self.data, model_type_ub, threads=self.threads, symmetry_breaking=False)
 
         if model_type_ub == 'arc':
-            # The tour SOCP over the support (rounded incumbent: MIP values
-            # can sit up to IntFeasTol away from 0/1); see build_tour_socp.
+            # Rounded incumbent: MIP values can sit up to IntFeasTol from 0/1
             tour_arcs = [(i, j) for i in range(self.data.n) for j in range(self.data.n)
                          if i != j and x_sol[i, j] > 0.5]
             ub_solver.build_tour_socp(tour_arcs)
         else:
             ub_solver.build()
 
-            # Fix the integer variables to the rounded incumbent: MIP values can
-            # sit up to IntFeasTol away from 0/1, and a binary with fractional
-            # equal bounds would be infeasible.
+            # Fix x to the rounded incumbent
             for i in range(self.data.n):
                 for j in range(self.data.n):
                     v = 1.0 if x_sol[i, j] > 0.5 else 0.0
@@ -457,18 +422,14 @@ class CETSPModel:
 
         ub_model.optimize()
 
-        # Any feasible point of the fixed-sequence problem is a valid upper bound;
-        # SUBOPTIMAL (with a solution) is therefore acceptable, only the exactness
-        # of the tour length is lost.
+        # Any feasible point is a valid upper bound, so SUBOPTIMAL with a solution is accepted
         if ub_model.status == GRB.OPTIMAL or (ub_model.status == GRB.SUBOPTIMAL and ub_model.SolCount > 0):
-            # Extract arcs and points from the upper bound model
             arcs = []
             points = {}
 
             if model_type_ub == 'arc':
                 arcs = list(ub_solver.tour_arcs)
             else:
-                # Retrieve x solution from ub_model
                 ub_x_sol = ub_model.getAttr('X', ub_solver.x)
 
             if model_type_ub == 'perspective':
@@ -488,7 +449,6 @@ class CETSPModel:
                     arcs.append((tour_sequence[k], tour_sequence[k+1]))
                 arcs.append((tour_sequence[self.data.n - 1], tour_sequence[0]))
 
-            # Extract points if they exist in the model
             if hasattr(ub_solver, 'p_x') and hasattr(ub_solver, 'p_y'):
                 ub_p_x_sol = ub_model.getAttr('X', ub_solver.p_x)
                 ub_p_y_sol = ub_model.getAttr('X', ub_solver.p_y)
@@ -512,7 +472,9 @@ class CETSPModel:
 
     def _retrieve_solution(self):
         """
-        Retrieves the solution from the solved model.
+        Reads bounds, gap and solution from the solved model. The upper bound
+        of the decompositions and of ABF is recomputed from the tour with the
+        exact SOCP.
         """
 
         self.status = self.model.status
@@ -529,19 +491,15 @@ class CETSPModel:
             x_sol = self.model.getAttr('X', self.solver.x)
 
             if self.extended and not self.decomposition:
-                # For extended formulations without decomposition, solve an exact SOCP to get the feasible solution
+                # Approximate models: the feasible solution comes from the exact SOCP
                 ub_obj_val, ub_arcs, ub_points = self.compute_upper_bound(x_sol)
                 self.upper_bound = ub_obj_val
                 self.arcs = ub_arcs
                 self.points = ub_points
             elif self.decomposition:
-                # The master objective equals the tour length only if every
-                # incumbent was verified by the subproblem. A subproblem that
-                # failed lets an unverified incumbent through, so the reported UB
-                # is the length of the tour recomputed by the exact SOCP whenever
-                # that recomputation succeeds. The two differ by solver
-                # tolerances on a healthy run, so a mismatch is only reported as
-                # an unverified incumbent when a subproblem actually failed.
+                # The master objective is the tour length only if every incumbent
+                # was verified by the subproblem; report the recomputed length and
+                # flag a mismatch when a subproblem failed
                 self.upper_bound = self.model.ObjVal
                 self._extract_arcs_and_points()
                 ub_true, _, plot_points = self.compute_upper_bound(x_sol)
@@ -556,10 +514,8 @@ class CETSPModel:
                               file=sys.stderr, flush=True)
                     self.upper_bound = ub_true
             else:
-                # Monolithic SOCP models: the model objective is the true UB,
-                # up to solver tolerances. For ABF the big-M scales that
-                # tolerance (see build_tour_socp), so its incumbent is priced
-                # again by the tour SOCP and the true length is reported.
+                # Full SOCP models: the objective is the tour length up to solver
+                # tolerances, which the big-M of ABF amplifies (see build_tour_socp)
                 self.upper_bound = self.model.ObjVal
                 self._extract_arcs_and_points()
                 if self.model_type == 'arc':
@@ -569,7 +525,6 @@ class CETSPModel:
                         if plot_points:
                             self.points = plot_points
 
-            # Recalculate gap robustly
             if self.upper_bound is not None and self.upper_bound > 0 and self.upper_bound != float('inf'):
                 self.gap = (self.upper_bound - self.lower_bound) / self.upper_bound
             else:
@@ -580,7 +535,7 @@ class CETSPModel:
 
     def _extract_arcs_and_points(self):
         """
-        Extracts the tour arcs and the coordinates of the points from the solution.
+        Reads the tour arcs and the visit points from the solved model.
         """
         if not self.solver or not hasattr(self.solver, 'x'):
             return
@@ -614,7 +569,6 @@ class CETSPModel:
                         self.arcs.append((i, j))
                         self.points[i] = (p_i_sol[i, j, 0], p_i_sol[i, j, 1])
 
-        # Extract points if they exist in the model
         if hasattr(self.solver, 'p_x') and hasattr(self.solver, 'p_y'):
             p_x_sol = self.model.getAttr('X', self.solver.p_x)
             p_y_sol = self.model.getAttr('X', self.solver.p_y)
@@ -628,7 +582,7 @@ class CETSPModel:
 
     def get_solution_summary(self):
         """
-        Returns a summary of the solution.
+        Returns the run's metrics and solution as a dict, or a message if there is no solution.
         """
         if self.upper_bound is not None:
             return {

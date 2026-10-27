@@ -37,6 +37,7 @@ HIGH_ITER = 20000
 
 
 def h(g, c, r1, r2, e1, e2):
+    """Reference implementation of h(gamma) (see classes/cut_coefficients.py)."""
     return float(c @ g + r1 * np.linalg.norm(g - e1) + r2 * np.linalg.norm(g - e2))
 
 
@@ -137,6 +138,7 @@ def expected_code(c, r1, r2, e1, e2):
 
 
 def main():
+    """Runs the checks and exits non-zero if any fails."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--samples', type=int, default=300, help='draws per degenerate case')
     ap.add_argument('--seed', type=int, default=0)

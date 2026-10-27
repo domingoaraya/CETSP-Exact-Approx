@@ -43,7 +43,7 @@ OPTIONAL_COLUMNS = ('UB', 'LB', 'Root Bound', 'Nodes', 'Cuts',
 INSTANCE_KEY = ('n', 'r_min', 'r_max', 'Instance')
 
 #: Status string meaning the run proved optimality of its own model.  For the
-#: approximate formulations (and for B&S) this still leaves a discretisation
+#: approximate formulations (and for B&S) this still leaves a discretization
 #: gap, which is why gap statistics are reported over all rows as well as over
 #: the unsolved ones.
 OPTIMAL_STATUS = 'Optimal'
@@ -90,7 +90,7 @@ def parse_formulation(label):
 
     Returns a dict with keys :data:`FORMULATION_FIELDS` plus ``Formulation``.
     Raises ``ValueError`` on a token that does not fit the grammar, rather
-    than silently dropping it -- an unrecognised token means the label scheme
+    than silently dropping it -- an unrecognized token means the label scheme
     has changed and this module needs updating.
     """
     tokens = str(label).split('-')
@@ -131,7 +131,7 @@ def _sort_key(label):
 
 
 def order_formulations(labels):
-    """Sort labels by base and then by modifier, for stable colours/legends."""
+    """Sort labels by base and then by modifier, for stable colors/legends."""
     return sorted(dict.fromkeys(labels), key=_sort_key)
 
 
@@ -149,7 +149,7 @@ def describe_formulation(label):
     if p['strengthen']:
         parts.append('DFJ strengthening')
     if p['opt_coeff']:
-        parts.append('optimised coefficients')
+        parts.append('optimized coefficients')
     if p['symmetry']:
         parts.append('symmetry breaking')
     return f"{p['base']} ({', '.join(parts)})" if parts else p['base']
