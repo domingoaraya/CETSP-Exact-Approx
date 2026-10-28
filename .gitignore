@@ -2,6 +2,8 @@
 Results/*
 # Dont ignore paper results
 !Results/paper_results.csv
+!Results/experiment_results_all.csv
+!Results/relaxation_gaps_all.csv
 
 # Ignore generated instances
 Instances/*
