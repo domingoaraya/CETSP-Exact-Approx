@@ -7,3 +7,4 @@ scipy==1.15.3
 tqdm==4.67.0
 networkx==3.4.2
 matplotlib
+openpyxl==3.1.5

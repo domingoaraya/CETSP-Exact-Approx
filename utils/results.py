@@ -48,6 +48,13 @@ INSTANCE_KEY = ('n', 'r_min', 'r_max', 'Instance')
 #: the unsolved ones.
 OPTIMAL_STATUS = 'Optimal'
 
+#: Statuses meaning the run produced no result at all -- the solver died, or
+#: the driver recorded a placeholder in its place.  Such a row occupies an
+#: instance cell without filling it, so counting rows would report a grid as
+#: complete when part of it never ran.  These rows are excluded from figures
+#: and tables, and reported as missing coverage.
+FAILED_STATUSES = ('Crashed', 'Failed', 'Error')
+
 
 # --------------------------------------------------------------------------
 # Formulation label grammar
@@ -81,6 +88,11 @@ FLAG_FIELDS = ('extended', 'decomposition', 'strengthen', 'opt_coeff',
 FORMULATION_FIELDS = ('base', 'extended', 'decomposition', 'cut',
                       'strengthen', 'opt_coeff', 'symmetry')
 
+# Order formulations are presented in: arc, sequence, perspective, then the
+# B&S benchmark.  This drives legends and table rows, so it is the one place
+# to change the presentation order.  It does not affect which color a
+# formulation gets: the hue comes from its base and the shade from its
+# position among that base's own variants, neither of which this reorders.
 _BASE_ORDER = {'ABF': 0, 'SBF': 1, 'PBF': 2, 'BS': 3}
 _CUT_ORDER = {None: 0, 'enum': 1, 'dual': 2, 'DE': 3}
 
@@ -135,24 +147,75 @@ def order_formulations(labels):
     return sorted(dict.fromkeys(labels), key=_sort_key)
 
 
-def describe_formulation(label):
-    """A human-readable expansion of a label, for captions."""
-    p = parse_formulation(label)
-    parts = []
-    if p['extended']:
-        parts.append('polyhedral')
-    if p['decomposition']:
-        parts.append('Benders')
-    if p['cut']:
-        parts.append({'enum': 'enumerative cuts', 'dual': 'dual cuts',
-                      'DE': 'dual+enumerative cuts'}[p['cut']])
-    if p['strengthen']:
-        parts.append('DFJ strengthening')
-    if p['opt_coeff']:
-        parts.append('optimized coefficients')
-    if p['symmetry']:
-        parts.append('symmetry breaking')
-    return f"{p['base']} ({', '.join(parts)})" if parts else p['base']
+#: Modifier tokens dropped from display labels by default.  Each is constant
+#: across the current experiment, so it separates nothing and only lengthens
+#: the legend.
+NOISE_TOKENS = ('S', 'OC', 'B')
+
+
+def simplify_labels(formulations, drop=NOISE_TOKENS, drop_cut='auto'):
+    """Shorten labels for a legend, keeping only what separates them.
+
+    ``drop`` removes those modifier tokens outright -- by default ``-S``,
+    ``-OC`` and ``-B``, which every formulation in the current runs carries.
+
+    ``drop_cut`` removes the cut-type token.  Under ``'auto'`` it goes only
+    where it separates nothing: if no two of the selected formulations share a
+    base, extended flag and decomposition flag while differing in cut type,
+    then ``PBF-D-dual`` is already unambiguous as ``PBF-D``.  ``True`` always
+    drops it, ``False`` never does.  So a plot of PBF alone with only dual
+    cuts reads ``PBF-D``, while one that also carries the enumerative variant
+    keeps ``PBF-D-dual`` and ``PBF-D-enum``.
+
+    Returns a list aligned with ``formulations``.  Labels that collide after
+    shortening keep their distinguishing tokens, so the result never maps two
+    formulations onto one name.
+    """
+    formulations = list(formulations)
+    parsed = [parse_formulation(label) for label in formulations]
+
+    def group_of(entry):
+        return (entry['base'], entry['extended'], entry['decomposition'])
+
+    # Decided per decomposition, not across the whole selection: PBF-D-dual
+    # can shorten to PBF-D while PBF-A-D-dual, which has an enumerative
+    # sibling in the same plot, keeps its cut name.
+    if drop_cut == 'auto':
+        cuts_per_group = {}
+        for entry in parsed:
+            cuts_per_group.setdefault(group_of(entry), set()).add(entry['cut'])
+        ambiguous = {group for group, cuts in cuts_per_group.items()
+                     if len(cuts) > 1}
+        keeps_cut = [group_of(entry) in ambiguous for entry in parsed]
+    else:
+        keeps_cut = [not drop_cut] * len(parsed)
+
+    def render(entry, keep_cut, keep_flags):
+        parts = [entry['base']]
+        if entry['extended']:
+            parts.append('A')
+        if entry['decomposition']:
+            parts.append('D')
+        if entry['cut'] and keep_cut:
+            parts.append(entry['cut'])
+        for field, token in (('strengthen', 'S'), ('opt_coeff', 'OC'),
+                             ('symmetry', 'B')):
+            if entry[field] and (token not in drop or token in keep_flags):
+                parts.append(token)
+        return '-'.join(parts)
+
+    labels = [render(entry, keep, ()) for entry, keep in zip(parsed, keeps_cut)]
+
+    # Shortening must never merge two formulations into one legend entry.
+    # Restore the least that separates them again: first the cut type, and
+    # only for whatever still collides after that, the dropped flags.
+    for restore in ((True, ()), (True, drop)):
+        collided = {name for name in labels if labels.count(name) > 1}
+        if not collided:
+            break
+        labels = [render(entry, *restore) if name in collided else name
+                  for entry, name in zip(parsed, labels)]
+    return labels
 
 
 # --------------------------------------------------------------------------
@@ -243,7 +306,7 @@ def load_results(source, sheet=None, time_limit=None,
 
     Added columns
     -------------
-    ``r_mean``, ``sigma``, ``Solved``, ``GapPct``, ``TimeLimit``,
+    ``r_mean``, ``sigma``, ``Solved``, ``Usable``, ``GapPct``, ``TimeLimit``,
     ``RootGapPct`` (when ``UB``/``Root Bound`` are present), and one column per
     entry of :data:`FORMULATION_FIELDS`.
     """
@@ -268,6 +331,7 @@ def load_results(source, sheet=None, time_limit=None,
     df['sigma'] = df['sigma'].round(6)
 
     df['Solved'] = df['Status'] == optimal_status
+    df['Usable'] = ~df['Status'].isin(FAILED_STATUSES)
     df['GapPct'] = 100.0 * df['Gap']
 
     if time_limit is not None:
@@ -311,7 +375,36 @@ def _as_set(value):
     return {value}
 
 
-def select(df, formulations=None, labels_only=True, **predicates):
+def _predicate_mask(df, predicates):
+    """Boolean mask for rows matching every predicate in the dict."""
+    mask = pd.Series(True, index=df.index)
+    lowered = {str(c).lower(): c for c in df.columns}
+    for key, value in predicates.items():
+        if value is None:
+            continue
+        if key not in df.columns:
+            if key.lower() not in lowered:
+                raise KeyError(
+                    f'{key!r} is not a column of the results frame; '
+                    f'available: {sorted(df.columns)}')
+            key = lowered[key.lower()]
+        if key == 'cut':
+            # The absence of a cut-type token is a value in its own right,
+            # stored as null, so it needs matching by isna rather than isin --
+            # including when it appears inside a list alongside real types.
+            wanted = _as_set(value)
+            no_cut = any(v is False or v is None for v in wanted)
+            named = {v for v in wanted if isinstance(v, str)}
+            column = (df['cut'].isin(named) if named
+                      else pd.Series(False, index=df.index))
+            mask &= (column | df['cut'].isna()) if no_cut else column
+        else:
+            mask &= df[key].isin(_as_set(value))
+    return mask
+
+
+def select(df, formulations=None, labels_only=True, exclude=None,
+           **predicates):
     """Select formulations by predicate instead of by literal label.
 
     Any column of ``df`` may be used as a keyword: the modifier fields
@@ -335,39 +428,33 @@ def select(df, formulations=None, labels_only=True, **predicates):
     >>> select(df, base='PBF', cut=['dual', False])  # dual cuts, or none
     ['PBF-S-B', 'PBF-D-dual-S-OC-B', 'PBF-A-S-B', 'PBF-A-D-dual-S-OC-B']
 
+    ``exclude`` takes a dict of predicates to remove, or a list of such dicts
+    as alternatives.  Each dict is a conjunction, so this drops only the PBF
+    that is decomposed *and* uses enumerative cuts, and separately every
+    monolithic approximation (extended but not decomposed, whose bound is not
+    valid for the CETSP and so does not belong on a performance profile)::
+
+        select(df, exclude=[dict(base='PBF', extended=False,
+                                 decomposition=True, cut='enum'),
+                            dict(extended=True, decomposition=False)])
+
     A selection that no single predicate describes is the union of two, which
     :func:`order_formulations` dedupes and re-sorts::
 
         order_formulations(select(df, base='ABF', decomposition=True)
                            + select(df, base='PBF', decomposition=False))
     """
-    mask = pd.Series(True, index=df.index)
+    mask = _predicate_mask(df, predicates)
 
     if formulations is not None:
         mask &= df['Formulation'].isin(_as_set(formulations))
 
-    lowered = {str(c).lower(): c for c in df.columns}
-    for key, value in predicates.items():
-        if value is None:
-            continue
-        if key not in df.columns:
-            if key.lower() not in lowered:
-                raise KeyError(
-                    f'{key!r} is not a column of the results frame; '
-                    f'available: {sorted(df.columns)}')
-            key = lowered[key.lower()]
-        if key == 'cut':
-            # The absence of a cut-type token is a value in its own right,
-            # stored as null, so it needs matching by isna rather than isin --
-            # including when it appears inside a list alongside real types.
-            wanted = _as_set(value)
-            no_cut = any(v is False or v is None for v in wanted)
-            named = {v for v in wanted if isinstance(v, str)}
-            column = (df['cut'].isin(named) if named
-                      else pd.Series(False, index=df.index))
-            mask &= (column | df['cut'].isna()) if no_cut else column
-        else:
-            mask &= df[key].isin(_as_set(value))
+    if exclude is not None:
+        rules = [exclude] if isinstance(exclude, dict) else list(exclude)
+        for rule in rules:
+            # Each rule is a conjunction, so a row is excluded only when it
+            # matches every key of that rule; several rules are alternatives.
+            mask &= ~_predicate_mask(df, rule)
 
     filtered = df[mask]
     if not labels_only:
@@ -380,19 +467,21 @@ def formulations_in(df):
     return order_formulations(df['Formulation'].unique())
 
 
-def frames_for(df, formulations):
-    """``{label: sub-frame}`` for the given labels, preserving their order."""
-    return {label: df[df['Formulation'] == label] for label in formulations}
-
-
 # --------------------------------------------------------------------------
 # Coverage
 # --------------------------------------------------------------------------
 
-def coverage(df, formulations=None, key=INSTANCE_KEY):
-    """Run counts per instance cell and formulation (NaN where absent)."""
+def coverage(df, formulations=None, key=INSTANCE_KEY, usable_only=True):
+    """Run counts per instance cell and formulation (NaN where absent).
+
+    Counts only runs that produced a result: a row recording a crash holds a
+    cell without filling it, and counting it would call the grid complete.
+    Pass ``usable_only=False`` to count every recorded row instead.
+    """
     formulations = formulations or formulations_in(df)
     sub = df[df['Formulation'].isin(formulations)]
+    if usable_only and 'Usable' in sub.columns:
+        sub = sub[sub['Usable']]
     table = sub.pivot_table(index=list(key), columns='Formulation',
                             values='Time', aggfunc='size')
     return table.reindex(columns=[f for f in formulations
@@ -420,9 +509,13 @@ def coverage_report(df, formulations=None, key=INSTANCE_KEY):
     return report
 
 
-def missing_cells(df, formulations=None, key=INSTANCE_KEY):
-    """Long-form list of (formulation, cell) pairs absent from the data."""
-    table = coverage(df, formulations, key)
+def missing_cells(df, formulations=None, key=INSTANCE_KEY, usable_only=True):
+    """Long-form list of (formulation, cell) pairs with no usable result.
+
+    With ``usable_only=False`` only cells carrying no row at all are listed,
+    so a recorded failure does not count as missing.
+    """
+    table = coverage(df, formulations, key, usable_only=usable_only)
     absent = table.isna().stack()
     absent = absent[absent]
     if absent.empty:
@@ -492,6 +585,12 @@ METRICS = {
     'Gap (%)':     (lambda g: _mean(g['GapPct']), 2),
     'Gap NoOpt (%)': (lambda g: _mean(g.loc[~g['Solved'], 'GapPct']), 2),
     'RootGap (%)': (lambda g: _mean(g['RootGapPct']), 2),
+    # Gap of the continuous relaxation against the best known bound, read
+    # from a separate root-gap file and merged in by the caller.  Absent
+    # unless that merge has happened, so it degrades to a dash rather than
+    # raising on a frame that does not carry it.
+    'Root gap (%)': (lambda g: _mean(g['RootRelaxPct'])
+                     if 'RootRelaxPct' in g else np.nan, 2),
     'Cuts':        (lambda g: _mean(g['Cuts']), 2),
     'DFJ Cuts':    (lambda g: _mean(g['DFJ_Cuts']), 2),
     'Nodes':       (lambda g: _mean(g['Nodes']), 0),
@@ -500,7 +599,7 @@ METRICS = {
 }
 
 #: Columns reported unless ``metrics`` says otherwise.
-DEFAULT_METRICS = ('Runs', 'Opt', 'TimeOpt', 'Gap (%)', 'Gap NoOpt (%)', 'Cuts')
+DEFAULT_METRICS = ('Opt', 'TimeOpt', 'Gap (%)', 'Gap NoOpt (%)', 'Cuts')
 
 
 def summary_table(df, formulations=None, by=None, metrics=DEFAULT_METRICS,
@@ -522,6 +621,10 @@ def summary_table(df, formulations=None, by=None, metrics=DEFAULT_METRICS,
     """
     formulations = formulations or formulations_in(df)
     sub = df[df['Formulation'].isin(formulations)]
+    # Rows recording a crash hold no result, so they do not belong in a mean
+    # or a count; the coverage warning reports them as missing instead.
+    if 'Usable' in sub.columns:
+        sub = sub[sub['Usable']]
 
     if align:
         sub, _ = common_instances(sub, formulations)
@@ -575,9 +678,142 @@ def pairwise_table(df, x, y, metrics=('Time', 'GapPct'), key=INSTANCE_KEY):
     # must not be selected twice, or the merge sees a duplicate label.
     carried = [c for c in dict.fromkeys(list(metrics) + ['Solved', 'Status'])
                if c not in key]
+    # A run that produced no result cannot be a point on a comparison: its
+    # sentinel time and gap would plot as a real, terrible result.
+    if 'Usable' in df.columns:
+        df = df[df['Usable']]
     left = df[df['Formulation'] == x][key + carried]
     right = df[df['Formulation'] == y][key + carried]
     if left.empty or right.empty:
         missing = x if left.empty else y
         raise ValueError(f'no rows for formulation {missing!r}')
     return left.merge(right, on=key, suffixes=('_x', '_y'))
+
+def shifted_geometric_mean(values, shift=10.0):
+    """Geometric mean of ``values + shift``, less the shift.
+
+    The standard way to average solver runtimes: a plain arithmetic mean is
+    dominated by the runs that hit the limit, and a plain geometric mean by
+    the ones that finish in milliseconds.  The shift damps both ends.
+    """
+    values = np.asarray([v for v in values if np.isfinite(v)], dtype=float)
+    if not len(values):
+        return np.nan
+    return float(np.exp(np.mean(np.log(np.maximum(values, 0.0) + shift)))
+                 - shift)
+
+
+#: How ``head_to_head`` reports runtime, and the column prefix each uses.
+TIME_SUMMARIES = {
+    # Shifted geometric mean over every run, timeouts included at the limit.
+    # Both sides are averaged over the same instances, so the columns
+    # compare, at the cost of being censored wherever a run hit the limit.
+    'sgm': ('SGM', 'all'),
+    # Mean over each side's own completed runs.  Uncensored and directly
+    # interpretable, but each column is an average over a *different* set of
+    # instances -- a formulation that only finishes the easy ones looks fast
+    # -- so the two are not comparable with each other.
+    'completed': ('Time', 'completed'),
+    # Shifted geometric mean over the instances both sides completed.  Same
+    # sample and uncensored, but undefined where they share no completions.
+    'paired': ('SGM', 'both'),
+}
+
+
+def _time_summary(block, side, how, both, shift):
+    """One side's runtime column, under the chosen summary."""
+    times = block[f'Time_{side}']
+    if how == 'sgm':
+        return shifted_geometric_mean(times, shift)
+    if how == 'completed':
+        done = times[block[f'_s{side}']]
+        return done.mean() if len(done) else np.nan
+    shared = times[both]
+    return shifted_geometric_mean(shared, shift) if len(shared) else np.nan
+
+
+def head_to_head(df, x, y, by=None, key=INSTANCE_KEY, shift=10.0,
+                 solved_gap=None, labels=None, time='sgm'):
+    """Compare two formulations instance by instance, as a table.
+
+    The scatter's virtue is that it is paired; this is the same pairing read
+    as counts.  Only cells both formulations ran appear, so the comparison is
+    like for like, and every column is computed over that shared set.
+
+    ``solved_gap`` decides what counts as solved.  Left as None it is the
+    status alone, which is the wrong question for a formulation whose
+    ``Optimal`` means it closed its own relaxation rather than the CETSP --
+    B&S reports ``Optimal`` on instances with a double-digit gap.  Give it a
+    percentage and a run counts as solved only if it is ``Optimal`` *and*
+    within that gap.
+
+    ``time`` picks how runtime is summarized, from :data:`TIME_SUMMARIES`:
+    ``'sgm'`` (the default) is the shifted geometric mean over every run,
+    ``'completed'`` the mean over each side's own completed runs, and
+    ``'paired'`` the shifted geometric mean over the instances both
+    completed.  Only ``'sgm'`` is defined on every row and only it and
+    ``'paired'`` average the two sides over the same instances; see the notes
+    in :data:`TIME_SUMMARIES` before putting ``'completed'`` beside another
+    formulation's column.
+
+    Columns: how many cells each side solved and how they split, who was
+    faster among the cells both solved, who held the smaller gap among the
+    cells neither solved, and the runtime summary of each.
+    """
+    if time not in TIME_SUMMARIES:
+        raise KeyError(f'time must be one of {sorted(TIME_SUMMARIES)}')
+    time_prefix, time_scope = TIME_SUMMARIES[time]
+    metrics = ('Time', 'GapPct', 'Status')
+    paired = pairwise_table(df, x, y, metrics=metrics, key=key)
+    if paired.empty:
+        raise ValueError(f'{x!r} and {y!r} share no instance cells')
+
+    def solved(side):
+        done = paired[f'Status_{side}'] == OPTIMAL_STATUS
+        if solved_gap is not None:
+            done &= paired[f'GapPct_{side}'].abs() <= solved_gap
+        return done
+
+    paired = paired.assign(_sx=solved('x'), _sy=solved('y'))
+
+    if by is not None:
+        # The grouping column is an instance property, so the merge may have
+        # suffixed it; either copy will do.
+        if by not in paired.columns:
+            paired = paired.assign(**{by: paired[f'{by}_x']})
+        groups = list(paired.groupby(by, dropna=False, sort=True))
+    else:
+        groups = [(None, paired)]
+
+    name_x, name_y = labels or simplify_labels([x, y])
+    rows = []
+    for value, block in groups:
+        both = block['_sx'] & block['_sy']
+        neither = ~block['_sx'] & ~block['_sy']
+        faster_x = both & (block['Time_x'] < block['Time_y'])
+        faster_y = both & (block['Time_y'] < block['Time_x'])
+        tighter_x = neither & (block['GapPct_x'] < block['GapPct_y'])
+        tighter_y = neither & (block['GapPct_y'] < block['GapPct_x'])
+
+        row = {} if value is None else {by: value}
+        row.update({
+            'Cells': len(block),
+            f'{name_x} solved': int(block['_sx'].sum()),
+            f'{name_y} solved': int(block['_sy'].sum()),
+            'Both': int(both.sum()),
+            f'Only {name_x}': int((block['_sx'] & ~block['_sy']).sum()),
+            f'Only {name_y}': int((~block['_sx'] & block['_sy']).sum()),
+            'Neither': int(neither.sum()),
+            f'{name_x} faster': int(faster_x.sum()),
+            f'{name_y} faster': int(faster_y.sum()),
+            f'{name_x} tighter': int(tighter_x.sum()),
+            f'{name_y} tighter': int(tighter_y.sum()),
+            f'{time_prefix} {name_x}': _time_summary(block, 'x', time,
+                                                     both, shift),
+            f'{time_prefix} {name_y}': _time_summary(block, 'y', time,
+                                                     both, shift),
+            f'Gap {name_x}': block['GapPct_x'].mean(),
+            f'Gap {name_y}': block['GapPct_y'].mean(),
+        })
+        rows.append(row)
+    return pd.DataFrame(rows)

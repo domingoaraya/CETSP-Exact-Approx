@@ -23,7 +23,6 @@ display hook would then draw a second copy of it.
 
 from __future__ import annotations
 
-import colorsys
 import math
 import warnings
 
@@ -36,7 +35,8 @@ import pandas as pd
 
 from utils.results import (INSTANCE_KEY, common_instances, formulations_in,
                            order_formulations, pairwise_table,
-                           parse_formulation, warn_on_uneven_coverage)
+                           parse_formulation, simplify_labels,
+                           warn_on_uneven_coverage)
 
 # --------------------------------------------------------------------------
 # Colors
@@ -54,53 +54,125 @@ BASE_PALETTE = {
 #: Hues for bases not in BASE_PALETTE.
 FALLBACK_PALETTE = ('#003f5c', '#708090', '#2a9d8f', '#e76f51')
 
-#: Lightness multipliers spanned within one base, light (simplest variant)
-#: to dark.  A single-variant base keeps its hue unchanged.
-LIGHTNESS_RANGE = (1.45, 0.70)
+#: OKLCH lightness spanned within one base, light (simplest variant) to dark.
+#: Inside the 0.43-0.77 band that keeps a mark legible on a white surface;
+#: four steps across it sit ~10 apart in OKLab dE, five ~7.7.
+LIGHTNESS_BAND = (0.45, 0.76)
+
+#: OKLCH chroma ceiling, so a mid step does not shout over its neighbours.
+CHROMA_CAP = 0.16
 
 
-def _lightness_variants(hex_color, count):
-    """`count` shades of one hue, from light to dark."""
+# -- OKLab, so that shades are perceptually even -------------------------------
+#
+# Scaling HLS lightness by a multiplier bunches the dark end and washes out the
+# light end, which is what makes four shades of one hue hard to tell apart.
+# Stepping OKLCH lightness instead spaces them evenly to the eye.
+
+def _srgb_to_linear(c):
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c):
+    c = np.clip(c, 0.0, 1.0)
+    return np.where(c <= 0.0031308, 12.92 * c, 1.055 * c ** (1 / 2.4) - 0.055)
+
+
+_LMS_FROM_LINEAR = np.array([[0.4122214708, 0.5363325363, 0.0514459929],
+                             [0.2119034982, 0.6806995451, 0.1073969566],
+                             [0.0883024619, 0.2817188376, 0.6299787005]])
+_OKLAB_FROM_LMS = np.array([[0.2104542553, 0.7936177850, -0.0040720468],
+                            [1.9779984951, -2.4285922050, 0.4505937099],
+                            [0.0259040371, 0.7827717662, -0.8086757660]])
+_LMS_FROM_OKLAB = np.linalg.inv(_OKLAB_FROM_LMS)
+_LINEAR_FROM_LMS = np.linalg.inv(_LMS_FROM_LINEAR)
+
+
+def _to_oklch(color):
+    """(lightness, chroma, hue in degrees) for any matplotlib color."""
+    linear = _srgb_to_linear(np.array(mcolors.to_rgb(color)))
+    lightness, a, b = _OKLAB_FROM_LMS @ np.cbrt(_LMS_FROM_LINEAR @ linear)
+    return lightness, float(np.hypot(a, b)), float(np.degrees(np.arctan2(b, a)))
+
+
+def _from_oklch(lightness, chroma, hue_degrees):
+    radians = np.radians(hue_degrees)
+    oklab = np.array([lightness, chroma * np.cos(radians),
+                      chroma * np.sin(radians)])
+    return _LINEAR_FROM_LMS @ (_LMS_FROM_OKLAB @ oklab) ** 3
+
+
+def _max_chroma(lightness, hue_degrees):
+    """Largest chroma at this lightness and hue that stays inside sRGB."""
+    low, high = 0.0, 0.4
+    for _ in range(30):
+        middle = (low + high) / 2
+        linear = _from_oklch(lightness, middle, hue_degrees)
+        if np.all(linear >= -1e-4) and np.all(linear <= 1 + 1e-4):
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def shade_ramp(color, count):
+    """`count` shades of one hue, light to dark, evenly spaced to the eye."""
+    _, _, hue = _to_oklch(color)
     if count == 1:
-        return [mcolors.to_rgb(hex_color)]
-    h, l, s = colorsys.rgb_to_hls(*mcolors.to_rgb(hex_color))
-    factors = np.linspace(*LIGHTNESS_RANGE, count)
-    return [colorsys.hls_to_rgb(h, min(l * f, 0.95), s) for f in factors]
+        levels = [sum(LIGHTNESS_BAND) / 2]
+    else:
+        levels = np.linspace(LIGHTNESS_BAND[1], LIGHTNESS_BAND[0], count)
+    ramp = []
+    for lightness in levels:
+        chroma = min(CHROMA_CAP, _max_chroma(lightness, hue) * 0.92)
+        ramp.append(tuple(_linear_to_srgb(_from_oklch(lightness, chroma, hue))))
+    return ramp
 
 
-def series_colors(formulations):
+def series_colors(formulations, universe=None):
     """Assign a color to each label: hue by base, lightness by variant.
 
-    Works for any number of series, unlike a fixed ten-color qualitative
-    map, and keeps a base's variants visually grouped.
+    The shade a formulation gets is its position among *all* the variants of
+    its base in ``universe``, not among the ones being drawn, so a color
+    follows the formulation rather than its rank in the current plot.  SBF-D
+    is the same color whether it is alone or beside every other SBF.
+    ``universe`` defaults to the formulations themselves, which is only
+    stable when every plot draws the same set -- the plotting functions pass
+    the whole results frame instead.
+
+    Returns a list aligned with ``formulations``.
     """
-    bases, unknown = [], []
+    universe = list(universe) if universe else list(formulations)
     for label in formulations:
+        if label not in universe:
+            universe.append(label)
+    universe = order_formulations(universe)
+
+    def base_of(label):
         try:
-            base = parse_formulation(label)['base']
+            return parse_formulation(label)['base']
         except ValueError:
-            base = None
-        bases.append(base)
-        if base is not None and base not in BASE_PALETTE and base not in unknown:
-            unknown.append(base)
+            return None
+
+    # Variants of each base, in the canonical order: the index into this list
+    # is the shade, and it does not move when a plot drops a sibling.
+    variants = {}
+    for label in universe:
+        variants.setdefault(base_of(label), []).append(label)
 
     hue_of = dict(BASE_PALETTE)
+    unknown = [b for b in variants if b not in BASE_PALETTE]
     for index, base in enumerate(unknown):
         hue_of[base] = FALLBACK_PALETTE[index % len(FALLBACK_PALETTE)]
 
-    counts = {}
-    for base in bases:
-        counts[base] = counts.get(base, 0) + 1
-
-    shades = {base: _lightness_variants(hue_of.get(base, FALLBACK_PALETTE[0]),
-                                        count)
-              for base, count in counts.items()}
-    used = {base: 0 for base in counts}
+    ramps = {base: shade_ramp(hue_of.get(base, FALLBACK_PALETTE[0]),
+                              len(siblings))
+             for base, siblings in variants.items()}
 
     colors = []
-    for base in bases:
-        colors.append(shades[base][used[base]])
-        used[base] += 1
+    for label in formulations:
+        base = base_of(label)
+        colors.append(ramps[base][variants[base].index(label)])
     return colors
 
 
@@ -108,12 +180,35 @@ def series_colors(formulations):
 # Shared helpers
 # --------------------------------------------------------------------------
 
+def _resolve_colors(df, formulations, colors):
+    """Colors for the series, stable across plots by default.
+
+    ``colors`` may be a ``{label: color}`` mapping, a list aligned with
+    ``formulations``, or None.  The
+    default derives the shade from every formulation present in ``df``, not
+    just the ones drawn, so filtering a plot never repaints the survivors.
+    """
+    if colors is None:
+        return series_colors(formulations, universe=formulations_in(df))
+    if isinstance(colors, dict):
+        missing = [f for f in formulations if f not in colors]
+        if missing:
+            raise KeyError(f'no color given for {missing}')
+        return [colors[f] for f in formulations]
+    return list(colors)
+
+
 def _resolve(df, formulations, align, warn, stacklevel=4):
     """Filter to the chosen formulations, optionally aligning, and warn."""
     formulations = list(formulations or formulations_in(df))
     sub = df[df['Formulation'].isin(formulations)]
     if sub.empty:
         raise ValueError(f'no rows for formulations {formulations}')
+    # A crash placeholder carries no result; drawn, it would read as a run
+    # with the worst possible gap.  Dropping it here is what lets the
+    # coverage warning below report the cell as missing.
+    if 'Usable' in sub.columns:
+        sub = sub[sub['Usable']]
     if align:
         sub, _ = common_instances(sub, formulations)
     elif warn:
@@ -191,8 +286,8 @@ def profile_axes(ax, df, formulations, labels=None, colors=None,
     the axis.
     """
     frames = {label: df[df['Formulation'] == label] for label in formulations}
-    labels = list(labels or formulations)
-    colors = colors or series_colors(formulations)
+    labels = list(labels or simplify_labels(formulations))
+    colors = _resolve_colors(df, formulations, colors)
 
     if time_limit is None:
         limits = df['TimeLimit'].dropna()
@@ -317,8 +412,8 @@ def performance_profile(df, formulations=None, labels=None, facet_by=None,
         default instead warns when coverage is uneven and plots everything.
     """
     sub, formulations = _resolve(df, formulations, align, warn)
-    labels = list(labels or formulations)
-    colors = colors or series_colors(formulations)
+    labels = list(labels or simplify_labels(formulations))
+    colors = _resolve_colors(df, formulations, colors)
 
     # Build the panels: (title, frame).
     if isinstance(facets, dict) and facet_by is None:
@@ -338,8 +433,10 @@ def performance_profile(df, formulations=None, labels=None, facet_by=None,
             mask = np.ones(len(sub), dtype=bool)
             for column, item in zip(keys, key):
                 mask &= (sub[column] == item).to_numpy()
-            name = ', '.join(f'{c}={v:g}' if isinstance(v, (int, float, np.number))
-                             else f'{c}={v}' for c, v in zip(keys, key))
+            name = ', '.join(
+                f'{GROUP_LABELS.get(c, c)}='
+                + (f'{v:g}' if isinstance(v, (int, float, np.number)) else f'{v}')
+                for c, v in zip(keys, key))
             panels.append((name, sub[mask]))
     else:
         panels = [(title or '', sub)]
@@ -429,18 +526,47 @@ SCATTER_METRICS = {
 
 _MARKERS = ('o', '^', 'D', 's', 'v', 'P', 'X', '*', '<', '>')
 
+#: Short names for the columns a scatter groups by, for the legend.
+GROUP_LABELS = {'r_mean': 'r', 'r_min': 'r min', 'r_max': 'r max'}
 
-def pairwise_scatter(df, x, y, metrics=('Time', 'GapPct'), color_by='r_mean',
+
+def pairwise_scatter(df, x=None, y=None, pairs=None,
+                     metrics=('Time', 'GapPct'), color_by='r_mean',
                      marker_by='n', labels=None, figsize=None, title=None,
-                     log=False, filename=None, dpi=300, show=True,
-                     key=INSTANCE_KEY, alpha=0.75):
-    """Compare two formulations instance by instance.
+                     log=False, legend=True, share_scale=True, row_pad=2.0,
+                     filename=None, dpi=300, show=True, key=INSTANCE_KEY,
+                     alpha=0.75):
+    """Compare formulations instance by instance, one or several pairs at once.
 
     Points are paired on :data:`utils.results.INSTANCE_KEY`, so only cells
     both formulations ran are plotted and a point always compares like with
     like.  ``color_by`` and ``marker_by`` may be any columns; their legends
     are built from the values actually present.
+
+    ``pairs`` takes a list of ``(x, y)`` tuples and lays the comparisons out as
+    one grid -- a row per pair, a column per metric -- under a single legend,
+    which is what a figure in a paper wants.  ``x`` and ``y`` on their own are
+    shorthand for one pair.  The color and marker scales are built over every
+    pair at once, so that one legend is true of all of them.
+
+    ``log`` is either a flag for every metric or the names of the ones that
+    want a log axis: ``log=('Time',)`` spreads out runtimes that span decades
+    while keeping the gap axis linear, which matters because a gap of 1e-13 on
+    an instance that solved would otherwise set the bottom of the axis.
+
+    ``share_scale`` gives a metric the same axis limits down its column, so
+    the rows compare; ``legend=False`` drops the legend, for composing several
+    figures by hand; ``row_pad`` is the gap between rows, in font-size units,
+    which keeps a row's x label off the panel beneath it.  ``title`` defaults to a description of the comparison
+    for a single pair and to nothing for several -- name it explicitly if you
+    want one.
     """
+    if pairs is None:
+        if x is None or y is None:
+            raise ValueError('give either x and y, or pairs=[(x, y), ...]')
+        pairs = [(x, y)]
+    pairs = [tuple(pair) for pair in pairs]
+
     metrics = [metrics] if isinstance(metrics, str) else list(metrics)
     unknown = [m for m in metrics if m not in SCATTER_METRICS]
     if unknown:
@@ -449,19 +575,31 @@ def pairwise_scatter(df, x, y, metrics=('Time', 'GapPct'), color_by='r_mean',
 
     columns = list(dict.fromkeys(metrics + [c for c in (color_by, marker_by)
                                             if c]))
-    paired = pairwise_table(df, x, y, metrics=columns, key=key)
-    if paired.empty:
-        raise ValueError(f'{x!r} and {y!r} share no instance cells')
+    tables = []
+    for left, right in pairs:
+        paired = pairwise_table(df, left, right, metrics=columns, key=key)
+        if paired.empty:
+            raise ValueError(f'{left!r} and {right!r} share no instance cells')
+        tables.append(paired)
 
     # Grouping columns come through the merge suffixed; they are instance
     # properties, so the two copies agree and either will do.
-    def grouping(column):
+    def grouping(paired, column):
         if column in paired.columns:
             return paired[column]
         return paired[f'{column}_x']
 
-    color_values = sorted(grouping(color_by).unique()) if color_by else [None]
-    marker_values = sorted(grouping(marker_by).unique()) if marker_by else [None]
+    # One scale over every pair, so the single legend is true of all panels.
+    def values_of(column):
+        if not column:
+            return [None]
+        seen = set()
+        for paired in tables:
+            seen.update(grouping(paired, column).unique())
+        return sorted(seen)
+
+    color_values = values_of(color_by)
+    marker_values = values_of(marker_by)
 
     cmap = plt.get_cmap('viridis' if len(color_values) > 4 else 'tab10')
     color_of = {v: cmap(i / max(1, len(color_values) - 1)
@@ -470,66 +608,123 @@ def pairwise_scatter(df, x, y, metrics=('Time', 'GapPct'), color_by='r_mean',
     marker_of = {v: _MARKERS[i % len(_MARKERS)]
                  for i, v in enumerate(marker_values)}
 
-    xlabel, ylabel = labels or (x, y)
+    # ``log`` may be a flag for every metric, or the metrics that want one:
+    # runtime spans decades and wants a log axis, while a gap that is 1e-13 on
+    # the instances that solved would drag a log axis down thirteen of them.
+    if isinstance(log, bool):
+        log_for = {metric: log for metric in metrics}
+    else:
+        wanted = set(log or ())
+        log_for = {metric: metric in wanted for metric in metrics}
+
+    involved = order_formulations([f for pair in pairs for f in pair])
+    name_of = dict(zip(involved, simplify_labels(involved)))
+    if isinstance(labels, dict):
+        name_of.update(labels)
+    elif labels is not None and len(pairs) == 1:
+        name_of = dict(zip(pairs[0], labels))
+
+    nrows, ncols = len(pairs), len(metrics)
     if figsize is None:
-        figsize = (5.0 * len(metrics), 5.0)
-    fig, axes = plt.subplots(1, len(metrics), figsize=figsize, squeeze=False)
-    axes = axes[0]
+        figsize = (5.0 * ncols, 5.0 * nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
 
-    for ax, metric in zip(axes, metrics):
-        name, _ = SCATTER_METRICS[metric]
-        xs, ys = paired[f'{metric}_x'], paired[f'{metric}_y']
-        for cv in color_values:
-            for mv in marker_values:
-                mask = np.ones(len(paired), dtype=bool)
-                if color_by:
-                    mask &= (grouping(color_by) == cv).to_numpy()
-                if marker_by:
-                    mask &= (grouping(marker_by) == mv).to_numpy()
-                if not mask.any():
-                    continue
-                ax.scatter(xs[mask], ys[mask], marker=marker_of[mv],
-                           color=color_of[cv], alpha=alpha, edgecolors='none')
+    # Axis extent per metric, shared down the column so the rows compare.
+    extent = {}
+    for metric in metrics:
+        pool = np.concatenate([
+            np.asarray(paired[f'{metric}_{side}'], dtype=float)
+            for paired in tables for side in ('x', 'y')])
+        pool = pool[np.isfinite(pool)]
+        top = _nice_ceiling(pool.max() if len(pool) else 1.0)
+        positive = pool[pool > 0]
+        bottom = (positive.min() * 0.5 if log_for[metric] and len(positive)
+                  else (1e-3 if log_for[metric] else 0.0))
+        extent[metric] = (bottom, top)
 
-        finite = np.concatenate([xs[np.isfinite(xs)], ys[np.isfinite(ys)]])
-        top = _nice_ceiling(finite.max() if len(finite) else 1.0)
-        bottom = 0.0
-        if log:
-            positive = finite[finite > 0]
-            bottom = positive.min() * 0.5 if len(positive) else 1e-3
-            ax.set_xscale('log')
-            ax.set_yscale('log')
-        ax.plot([max(bottom, 0), top], [max(bottom, 0), top], 'k--', lw=0.8)
-        ax.set_xlim(bottom if log else -0.02 * top, top)
-        ax.set_ylim(bottom if log else -0.02 * top, top)
-        ax.set_aspect('equal', adjustable='box')
-        ax.set_xlabel(f'{name} -- {xlabel}')
-        ax.set_ylabel(f'{name} -- {ylabel}')
-        ax.set_title(name)
-        ax.grid(True, linestyle='--', alpha=0.5)
+    for row, (paired, (left, right)) in enumerate(zip(tables, pairs)):
+        for column, metric in enumerate(metrics):
+            ax = axes[row][column]
+            name, _ = SCATTER_METRICS[metric]
+            xs, ys = paired[f'{metric}_x'], paired[f'{metric}_y']
 
-    handles = []
-    if marker_by:
-        handles += [plt.Line2D([], [], linestyle='None', color='black',
-                               marker=marker_of[v],
-                               label=f'{marker_by}={v:g}'
-                               if isinstance(v, (int, float, np.number)) else f'{marker_by}={v}')
-                    for v in marker_values]
-    if color_by:
-        handles += [plt.Line2D([], [], linestyle='None', marker='s',
-                               color=color_of[v],
-                               label=f'{color_by}={v:g}'
-                               if isinstance(v, (int, float, np.number)) else f'{color_by}={v}')
-                    for v in color_values]
-    fig.suptitle(title or f'{xlabel} vs {ylabel}   ({len(paired)} paired instances)')
+            for value in color_values:
+                for marker in marker_values:
+                    mask = np.ones(len(paired), dtype=bool)
+                    if color_by:
+                        mask &= (grouping(paired, color_by) == value).to_numpy()
+                    if marker_by:
+                        mask &= (grouping(paired, marker_by) == marker).to_numpy()
+                    if not mask.any():
+                        continue
+                    ax.scatter(xs[mask], ys[mask], marker=marker_of[marker],
+                               color=color_of[value], alpha=alpha,
+                               edgecolors='none')
+
+            if share_scale:
+                bottom, top = extent[metric]
+            else:
+                own = np.concatenate([np.asarray(xs, dtype=float),
+                                      np.asarray(ys, dtype=float)])
+                own = own[np.isfinite(own)]
+                top = _nice_ceiling(own.max() if len(own) else 1.0)
+                positive = own[own > 0]
+                bottom = (positive.min() * 0.5 if log_for[metric] and len(positive)
+                          else (1e-3 if log_for[metric] else 0.0))
+            if log_for[metric]:
+                ax.set_xscale('log')
+                ax.set_yscale('log')
+            ax.plot([max(bottom, 0), top], [max(bottom, 0), top], 'k--', lw=0.8)
+            ax.set_xlim(bottom if log_for[metric] else -0.02 * top, top)
+            ax.set_ylim(bottom if log_for[metric] else -0.02 * top, top)
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel(name_of.get(left, left))
+            ax.set_ylabel(name_of.get(right, right))
+            if row == 0:
+                ax.set_title(name)
+            ax.grid(True, linestyle='--', alpha=0.5)
+
+    def entry(column, value, **style):
+        name = GROUP_LABELS.get(column, column)
+        shown = f'{value:g}' if isinstance(value, (int, float, np.number))             else f'{value}'
+        return plt.Line2D([], [], linestyle='None', label=f'{name}={shown}',
+                          **style)
+
+    groups = []
+    if legend and marker_by:
+        groups.append([entry(marker_by, v, color='black', marker=marker_of[v])
+                       for v in marker_values])
+    if legend and color_by:
+        groups.append([entry(color_by, v, color=color_of[v], marker='s')
+                       for v in color_values])
+
+    # A legend fills column-major, so laying the groups out as plain rows
+    # would split one across two of them.  Pad each group to the same width
+    # and interleave: with one column per entry, each group lands on its own
+    # row, markers above colors.
+    handles, legend_columns = [], 1
+    if groups:
+        legend_columns = max(len(group) for group in groups)
+        blank = lambda: plt.Line2D([], [], linestyle='None', marker='None',
+                                   label=' ')
+        padded = [group + [blank()] * (legend_columns - len(group))
+                  for group in groups]
+        handles = [h for slot in zip(*padded) for h in slot]
+
+    if title is None and len(pairs) == 1:
+        left, right = pairs[0]
+        title = (f'{name_of.get(left, left)} vs {name_of.get(right, right)}'
+                 f'   ({len(tables[0])} paired instances)')
+    if title:
+        fig.suptitle(title)
+
     if handles:
-        ncol = min(len(handles), 6)
-        reserved = min(0.06 + 0.04 * math.ceil(len(handles) / ncol), 0.3)
-        fig.tight_layout(rect=(0.0, reserved, 1.0, 1.0))
-        fig.legend(handles=handles, loc='lower center', ncol=ncol,
+        reserved = min((0.05 + 0.035 * len(groups)) / nrows, 0.3)
+        fig.tight_layout(rect=(0.0, reserved, 1.0, 1.0), h_pad=row_pad)
+        fig.legend(handles=handles, loc='lower center', ncol=legend_columns,
                    frameon=False, bbox_to_anchor=(0.5, 0.0))
     else:
-        fig.tight_layout()
+        fig.tight_layout(h_pad=row_pad)
     if filename:
         fig.savefig(filename, dpi=dpi, bbox_inches='tight', transparent=True)
     if show:
@@ -548,177 +743,3 @@ def pairwise_scatter(df, x, y, metrics=('Time', 'GapPct'), color_by='r_mean',
 # Scaling and coverage
 # --------------------------------------------------------------------------
 
-def scaling_plot(df, formulations=None, metric='Time', over='n', agg='mean',
-                 labels=None, colors=None, align=False, warn=True,
-                 solved_only=False, min_count=1, size_by_count=True,
-                 logy=False, ax=None, figsize=(7, 5), title=None,
-                 filename=None, dpi=300, show=True):
-    """An aggregate metric against instance size (or any other column).
-
-    ``agg`` may be any pandas aggregation name, or ``'solved'`` for the count
-    of instances solved to optimality.
-
-    Every series is drawn over the same x values, with the ones it has no
-    data for left as gaps.  A line therefore breaks where a formulation has
-    nothing to average -- it is never carried straight across a missing point,
-    which would draw a segment through data that does not exist.
-
-    ``solved_only=True`` is the usual source of those gaps: a formulation that
-    proved nothing optimal at some size has no runtime to average there, so
-    its line stops.  That is reported as a warning, since an absent point and
-    an unrun configuration otherwise look identical.
-
-    It also leaves the surviving means resting on very different numbers of
-    runs, which flatters whichever formulation solved only the easy subset.
-    ``size_by_count`` therefore shrinks a marker in proportion to how thin its
-    sample is, leaving a full sample at the normal size -- so the plot is
-    unchanged when every point rests on the same number of runs, and thin
-    points shrink away when they do not.  ``min_count`` drops them outright.
-    For the counts themselves, plot ``agg='solved'``.
-    """
-    sub, formulations = _resolve(df, formulations, align, warn)
-    available = sub[[over, 'Formulation']].copy()
-    if solved_only:
-        sub = sub[sub['Solved']]
-    labels = list(labels or formulations)
-    colors = colors or series_colors(formulations)
-
-    own_fig = ax is None
-    fig = None
-    if own_fig:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.figure
-
-    # One x axis for every series, so a gap stays a gap.
-    x_values = sorted(available[over].dropna().unique())
-    ylabel = 'Instances solved' if agg == 'solved' else f'{agg} {metric}'
-    dropped = {}
-
-    # A full sample keeps the normal marker size; thinner ones shrink from
-    # it, so nothing grows and no new overplotting is introduced.
-    full_marker = plt.rcParams['lines.markersize'] ** 2
-    widest = 0
-
-    prepared = []
-    for label, name, color in zip(formulations, labels, colors):
-        frame = sub[sub['Formulation'] == label]
-        if agg == 'solved':
-            series = frame.groupby(over)['Solved'].sum()
-            counts = frame.groupby(over).size()
-        else:
-            series = frame.groupby(over)[metric].agg(agg)
-            counts = frame.groupby(over)[metric].count()
-
-        series = series.reindex(x_values)
-        counts = counts.reindex(x_values).fillna(0).astype(int)
-        if min_count > 1:
-            series = series.where(counts >= min_count)
-
-        # Distinguish "ran, but nothing to aggregate" from "never run".
-        ran = set(available.loc[available['Formulation'] == label, over])
-        missing = [x for x in x_values
-                   if x in ran and pd.isna(series.get(x))]
-        if missing:
-            dropped[label] = missing
-
-        widest = max(widest, int(counts.max()) if len(counts) else 0)
-        prepared.append((name, color, series, counts))
-
-    handles = []
-    for name, color, series, counts in prepared:
-        values = series.to_numpy(dtype=float)
-        uniform = not size_by_count or widest == 0
-        ax.plot(x_values, values, marker='o' if uniform else '',
-                color=color, label=name)
-        if not uniform:
-            # Marker area in proportion to the sample, off a floor so that
-            # the thinnest point shrinks noticeably without disappearing.
-            share = np.clip(counts.to_numpy(dtype=float) / widest, 0.0, 1.0)
-            ax.scatter(x_values, values, s=full_marker * (0.15 + 0.85 * share),
-                       color=color, zorder=3)
-        handles.append(Line2D([], [], color=color, marker='o', label=name))
-
-    if warn and dropped:
-        reason = ('solved nothing there' if solved_only
-                  else f'had fewer than {min_count} runs there')
-        detail = '; '.join(
-            f"{label} at {over}=" + ', '.join(f'{x:g}' for x in missing)
-            for label, missing in dropped.items())
-        warnings.warn(
-            f'line(s) stop short because a formulation {reason}: {detail}.  '
-            f'Those points are gaps, not zeros.', stacklevel=3)
-
-    ax.set_xlabel(over)
-    ax.set_ylabel(ylabel)
-    if logy:
-        ax.set_yscale('log')
-    ax.grid(True, linestyle='--', alpha=0.5)
-    ax.legend(handles=handles, fontsize='small')
-    if title:
-        ax.set_title(title)
-
-    if own_fig:
-        fig.tight_layout()
-        if filename:
-            fig.savefig(filename, dpi=dpi, bbox_inches='tight', transparent=True)
-        if show:
-            plt.show()
-            return None
-        plt.close(fig)
-    return fig
-
-
-def coverage_heatmap(df, formulations=None, over='n', figsize=None,
-                     title='Runs recorded', filename=None, dpi=300, show=True):
-    """Runs recorded per formulation and facet value -- what is still missing.
-
-    Worth a glance before any comparison on a partially complete results file.
-    """
-    formulations = list(formulations or formulations_in(df))
-    sub = df[df['Formulation'].isin(formulations)]
-    table = sub.pivot_table(index='Formulation', columns=over, values='Time',
-                            aggfunc='size')
-    table = table.reindex(order_formulations(table.index))
-
-    if figsize is None:
-        figsize = (1.0 * len(table.columns) + 3, 0.30 * len(table) + 1.6)
-    fig, ax = plt.subplots(figsize=figsize)
-
-    values = table.to_numpy(dtype=float)
-    # Completeness is judged per facet value: a column where every
-    # formulation ran 5 instances is complete, even next to one with 45.
-    expected = np.nanmax(values, axis=0, keepdims=True)
-    expected[~np.isfinite(expected) | (expected == 0)] = 1.0
-    ratio = np.where(np.isnan(values), 0.0, values) / expected
-
-    ax.imshow(ratio, aspect='auto', cmap='RdYlGn', vmin=0.0, vmax=1.0)
-
-    for i in range(values.shape[0]):
-        for j in range(values.shape[1]):
-            value = values[i, j]
-            text = '-' if np.isnan(value) else f'{int(value)}'
-            ax.text(j, i, text, ha='center', va='center', color='black',
-                    fontsize=8)
-
-    ax.set_xticks(range(len(table.columns)))
-    ax.set_xticklabels([f'{c:g}' if isinstance(c, (int, float, np.number)) else c
-                        for c in table.columns])
-    ax.set_yticks(range(len(table.index)))
-    ax.set_yticklabels(table.index, fontsize=8)
-    ax.set_xlabel(over)
-    ax.set_title(f'{title} (green = complete for that {over})')
-
-    fig.tight_layout()
-    if filename:
-        fig.savefig(filename, dpi=dpi, bbox_inches='tight', transparent=True)
-    if show:
-        # Returning the figure as well would make Jupyter's display hook draw
-        # it a second time, so a shown figure is not handed back.
-        plt.show()
-        return None
-    # Closing is what makes show=False hold: a figure left open is drawn by
-    # the notebook's inline backend at the end of the cell regardless.  The
-    # returned figure can still be saved, inspected and displayed later.
-    plt.close(fig)
-    return fig
