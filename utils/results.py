@@ -218,26 +218,6 @@ def simplify_labels(formulations, drop=NOISE_TOKENS, drop_cut='auto'):
     return labels
 
 
-def describe_formulation(label):
-    """A human-readable expansion of a label, for captions."""
-    p = parse_formulation(label)
-    parts = []
-    if p['extended']:
-        parts.append('polyhedral')
-    if p['decomposition']:
-        parts.append('Benders')
-    if p['cut']:
-        parts.append({'enum': 'enumerative cuts', 'dual': 'dual cuts',
-                      'DE': 'dual+enumerative cuts'}[p['cut']])
-    if p['strengthen']:
-        parts.append('DFJ strengthening')
-    if p['opt_coeff']:
-        parts.append('optimized coefficients')
-    if p['symmetry']:
-        parts.append('symmetry breaking')
-    return f"{p['base']} ({', '.join(parts)})" if parts else p['base']
-
-
 # --------------------------------------------------------------------------
 # Loading
 # --------------------------------------------------------------------------
@@ -487,115 +467,9 @@ def formulations_in(df):
     return order_formulations(df['Formulation'].unique())
 
 
-def frames_for(df, formulations):
-    """``{label: sub-frame}`` for the given labels, preserving their order."""
-    return {label: df[df['Formulation'] == label] for label in formulations}
-
-
 # --------------------------------------------------------------------------
 # Coverage
 # --------------------------------------------------------------------------
-
-def failed_runs(df, key=INSTANCE_KEY, include_absent=True):
-    """Every run that produced no result, by formulation and instance.
-
-    Covers both ways a cell can end up without one: a row recorded with a
-    failure status, where the solver died and the driver wrote a placeholder
-    in its place, and a cell carrying no row at all.  The ``Kind`` column
-    separates them, since only the first leaves anything behind to inspect.
-
-    Returns an empty frame with the same columns when nothing failed.
-    """
-    key = list(key)
-    columns = ['Kind', 'Formulation'] + key + ['Status', 'Time']
-
-    pieces = []
-    recorded = set()
-    if 'Usable' in df.columns:
-        rows = df[~df['Usable']]
-        if len(rows):
-            block = rows[['Formulation'] + key + ['Status', 'Time']].copy()
-            block.insert(0, 'Kind', 'recorded failure')
-            pieces.append(block)
-            recorded = set(map(tuple, rows[['Formulation'] + key].values))
-
-    if include_absent:
-        # Cells with no row whatsoever.  Counting usable rows here would
-        # report the recorded failures a second time, as they hold a cell
-        # without filling it.
-        absent = missing_cells(df, key=key, usable_only=False)
-        if len(absent):
-            absent = absent[[tuple(row) not in recorded for row in
-                             absent[['Formulation'] + key].values]]
-        if len(absent):
-            block = absent[['Formulation'] + key].copy()
-            block.insert(0, 'Kind', 'no row')
-            block['Status'] = 'absent'
-            block['Time'] = float('nan')
-            pieces.append(block)
-
-    if not pieces:
-        return pd.DataFrame(columns=columns)
-
-    out = pd.concat(pieces, ignore_index=True)[columns]
-    return out.sort_values(['Kind', 'Formulation'] + key).reset_index(drop=True)
-
-
-def audit_statuses(df):
-    """Check that every status in the data is classified correctly.
-
-    :data:`FAILED_STATUSES` is a list of names, and names drift: the driver
-    also emits ``Other_<gurobi code>`` for any termination it does not name,
-    and a run recorded by some other script may use a word of its own.
-    Matching on the name alone therefore cannot be trusted on a new file.
-
-    What a non-result actually looks like is a *placeholder*: the driver's
-    failure branch writes ``UB = inf``, ``LB = 0``, ``Gap = inf``,
-    ``Nodes = 0`` and ``Cuts = 0``.  That shape is detectable whatever the
-    status is called, so this reports it per status alongside the current
-    classification and flags any disagreement.
-
-    Act on the ``Verdict`` column: ``CHECK`` means rows that look like
-    placeholders are being counted as results, and the status belongs in
-    :data:`FAILED_STATUSES`; ``CHECK (kept?)`` means the reverse.
-    """
-    numeric = {c: pd.to_numeric(df.get(c), errors='coerce')
-               for c in ('UB', 'LB', 'Gap', 'Nodes', 'Cuts')}
-    # A file written to the older nine-column schema records no upper bound
-    # at all, which would make every row look like it had lost one.  The
-    # placeholder test needs the column to mean something.
-    records_bounds = bool(numeric['UB'].notna().any())
-    no_bound = ~np.isfinite(numeric['UB'])
-    placeholder = (no_bound
-                   & numeric['Nodes'].fillna(0).eq(0)
-                   & numeric['Cuts'].fillna(0).eq(0)
-                   & numeric['LB'].fillna(0).eq(0))
-
-    rows = []
-    for status, group in df.groupby('Status', dropna=False):
-        failed = status in FAILED_STATUSES
-        looks = int(placeholder.loc[group.index].sum())
-        if not records_bounds:
-            verdict = 'n/a (file records no UB)'
-        elif failed and looks < len(group):
-            verdict = 'CHECK (kept?)' if looks == 0 else 'mixed'
-        elif not failed and looks:
-            verdict = 'CHECK'
-        else:
-            verdict = 'ok'
-        rows.append({
-            'Status': status,
-            'Rows': len(group),
-            'Treated as': 'failure' if failed else 'result',
-            'Placeholder-shaped': looks if records_bounds else '-',
-            'No upper bound': (int(no_bound.loc[group.index].sum())
-                               if records_bounds else '-'),
-            'Verdict': verdict,
-        })
-    report = pd.DataFrame(rows).sort_values('Rows', ascending=False)
-    report.attrs['failed_statuses'] = FAILED_STATUSES
-    return report.reset_index(drop=True)
-
 
 def coverage(df, formulations=None, key=INSTANCE_KEY, usable_only=True):
     """Run counts per instance cell and formulation (NaN where absent).

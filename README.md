@@ -43,6 +43,7 @@ Experiments can be customized using the following parameters:
 - `--pbf_cut_type`: Cut type for perspective model decomposition. Same choices and defaults as above.
 - `--strengthen`: Use DFJ cut strengthening at the root node. Only available for ABF and PBF. Choices: `True`, `False` (default: `False`).
 - `--optimize_coefficients`: Optimize the PBF dual cut coefficients. Only applies to perspective decompositions using dual cuts; other configurations are skipped. Choices: `True`, `False` (default: `False`).
+- `--symmetry_breaking`: Add the symmetry-breaking inequalities, fixing the tour's orientation. Choices: `True`, `False` (default: `False`).
 - `--threads`: Gurobi threads per model, applied to the master, the subproblems and the upper bound solve alike. 0 lets Gurobi choose, 1 forces a single thread (default: 0).
 - `--verbosity`: Verbosity level for experiment output. Choices: `high`, `low` (default: `high`).
 - `--outfile`: CSV file where results are written (default: `Results/experiment_results.csv`). Each row is appended as soon as its instance finishes. If the file already exists, every `(Formulation, n, r_min, r_max, Instance)` combination already recorded in it is skipped.
@@ -70,6 +71,7 @@ Results are keyed by a label built from the configuration, e.g. `PBF-A-D-dual-OC
 | `-dual`, `-enum`, `-DE` | cut type: dual, enumerative, or both |
 | `-S` | DFJ cut strengthening at the root |
 | `-OC` | optimized dual cut coefficients |
+| `-B` | symmetry-breaking inequalities |
 
 ## Verification
 
@@ -96,17 +98,21 @@ E&AF-CETSP/
 │   ├───plotting.py
 │   └───solver.py
 ├───Instances/
-│   ├───10_0.125_0.375/
+│   ├───15_0.125_0.375/
 │   └───...
 ├───Results/
-│   └───paper_results.csv
+│   ├───experiment_results_all.csv
+│   ├───paper_results.csv
+│   └───relaxation_gaps_all.csv
 ├───utils/
-│   ├───analysis_functions.py
 │   ├───check_cut_coefficients.py
 │   ├───check_formulations.py
-│   └───instance_handler.py
+│   ├───instance_handler.py
+│   ├───plots.py
+│   └───results.py
+├───paper_results.ipynb
+├───relaxation_gaps.py
 ├───requirements.txt
-├───results_analysis.ipynb
 └───run_experiment.py
 ```
 
@@ -120,14 +126,23 @@ E&AF-CETSP/
 - **`solver.py`**: Implements the solution procedures within the `CETSP_L2_Solver` class, including the decomposition schemes and cut generation logic.
 
 #### `utils/`
-- **`analysis_functions.py`**: Contains functions for analyzing the results of the experiments.
+- **`results.py`**: Loads a results file into a tidy frame and selects from it.
+  Formulation labels are parsed into their modifiers, so a set of procedures is
+  chosen by predicate (`select(df, base='PBF', decomposition=True)`) rather than
+  by literal label; the radius regime is recovered from `r_min` and `r_max`, and
+  the time limit inferred from the runs that hit it. Also builds the summary and
+  head-to-head tables.
+- **`plots.py`**: Performance profiles and head-to-head scatter plots over any
+  set of procedures, with axis extents read off the data and a color per
+  formulation that does not change when a figure is filtered.
 - **`check_cut_coefficients.py`**: Sanity check for the cut coefficient kernel.
 - **`check_formulations.py`**: Cross-formulation sanity check.
 - **`instance_handler.py`**: Helper functions for creating, saving, and loading CETSP instances.
 
 ### Main Scripts and Notebooks
 - **`run_experiment.py`**: The main script to run the computational experiments. It allows for flexible configuration of the tests via command-line arguments.
-- **`results_analysis.ipynb`**: A Jupyter notebook for analyzing and visualizing the results from the experiments.
+- **`relaxation_gaps.py`**: Computes the continuous relaxation gap of each formulation on each instance, writing `Results/relaxation_gaps_all.csv`.
+- **`paper_results.ipynb`**: Produces the figures and tables of the paper's results section.
 
 ## Dependencies
 
@@ -141,6 +156,7 @@ E&AF-CETSP/
 -   **networkx**: Graph handling for DFJ cut separation.
 -   **matplotlib**: For plotting and data visualization.
 -   **tqdm**: For displaying progress bars during experiment execution.
+-   **openpyxl**: Read results stored as `.xlsx` rather than CSV.
 
 Pinned versions are in `requirements.txt`:
 ```bash
