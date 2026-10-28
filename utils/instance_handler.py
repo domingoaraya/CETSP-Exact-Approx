@@ -3,7 +3,8 @@ import os
 
 def generate_instance(n, r_min, r_max):
     """
-    Generates a new CETSP instance with random values.
+    Random instance: n centers uniform in [0, 10]^2, radii uniform in
+    [r_min, r_max], depot (target 0) with radius 0.
     """
     x_max = 10
     y_max = 10
@@ -19,7 +20,8 @@ def generate_instance(n, r_min, r_max):
 
 def create_and_save_instance(n, r_min, r_max, i):
     """
-    Creates and saves a single CETSP instance to a text file.
+    Generates instance i (seed i) and writes it to Instances/{n}_{r_min}_{r_max}/instance_{i}.txt,
+    one line per target: index x y radius.
     """
     np.random.seed(i)
 
@@ -42,7 +44,7 @@ def create_and_save_instance(n, r_min, r_max, i):
 
 def read_instance(file_path):
     """
-    Reads a CETSP instance from a text file.
+    Reads an instance file written by create_and_save_instance. Returns (n, centers, radii).
     """
     with open(file_path, "r") as f:
         lines = [line.split() for line in f]

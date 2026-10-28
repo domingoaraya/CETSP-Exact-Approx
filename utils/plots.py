@@ -3,7 +3,7 @@
 Every function takes the tidy frame produced by :mod:`utils.results` plus a
 list of formulation labels, and reads the axis extents off the data: the time
 axis spans the inferred time limit, the gap axis the observed gaps, and the
-colours are assigned per formulation base for any number of series.  No
+colors are assigned per formulation base for any number of series.  No
 function assumes a particular formulation set, number of panels, or grid of
 instance sizes.
 
@@ -39,7 +39,7 @@ from utils.results import (INSTANCE_KEY, common_instances, formulations_in,
                            warn_on_uneven_coverage)
 
 # --------------------------------------------------------------------------
-# Colours
+# Colors
 # --------------------------------------------------------------------------
 
 #: One hue per formulation base.  ABF and SBF keep the hues used in the
@@ -89,7 +89,7 @@ _LINEAR_FROM_LMS = np.linalg.inv(_LMS_FROM_LINEAR)
 
 
 def _to_oklch(color):
-    """(lightness, chroma, hue in degrees) for any matplotlib colour."""
+    """(lightness, chroma, hue in degrees) for any matplotlib color."""
     linear = _srgb_to_linear(np.array(mcolors.to_rgb(color)))
     lightness, a, b = _OKLAB_FROM_LMS @ np.cbrt(_LMS_FROM_LINEAR @ linear)
     return lightness, float(np.hypot(a, b)), float(np.degrees(np.arctan2(b, a)))
@@ -130,12 +130,12 @@ def shade_ramp(color, count):
 
 
 def series_colors(formulations, universe=None):
-    """Assign a colour to each label: hue by base, lightness by variant.
+    """Assign a color to each label: hue by base, lightness by variant.
 
     The shade a formulation gets is its position among *all* the variants of
-    its base in ``universe``, not among the ones being drawn, so a colour
+    its base in ``universe``, not among the ones being drawn, so a color
     follows the formulation rather than its rank in the current plot.  SBF-D
-    is the same colour whether it is alone or beside every other SBF.
+    is the same color whether it is alone or beside every other SBF.
     ``universe`` defaults to the formulations themselves, which is only
     stable when every plot draws the same set -- the plotting functions pass
     the whole results frame instead.
@@ -177,7 +177,7 @@ def series_colors(formulations, universe=None):
 
 
 def color_map(formulations):
-    """``{label: colour}`` over a fixed set, to reuse across every figure."""
+    """``{label: color}`` over a fixed set, to reuse across every figure."""
     return dict(zip(formulations, series_colors(formulations)))
 
 
@@ -186,9 +186,9 @@ def color_map(formulations):
 # --------------------------------------------------------------------------
 
 def _resolve_colors(df, formulations, colors):
-    """Colours for the series, stable across plots by default.
+    """Colors for the series, stable across plots by default.
 
-    ``colors`` may be a ``{label: colour}`` mapping (from
+    ``colors`` may be a ``{label: color}`` mapping (from
     :func:`color_map`), a list aligned with ``formulations``, or None.  The
     default derives the shade from every formulation present in ``df``, not
     just the ones drawn, so filtering a plot never repaints the survivors.
@@ -198,7 +198,7 @@ def _resolve_colors(df, formulations, colors):
     if isinstance(colors, dict):
         missing = [f for f in formulations if f not in colors]
         if missing:
-            raise KeyError(f'no colour given for {missing}')
+            raise KeyError(f'no color given for {missing}')
         return [colors[f] for f in formulations]
     return list(colors)
 
@@ -352,7 +352,7 @@ def profile_axes(ax, df, formulations, labels=None, colors=None,
     # Axis furniture.
     if time_scale == 'log':
         # Decades crowd together near zero once mapped, so thin them from the
-        # right, which keeps the time limit itself labelled.
+        # right, which keeps the time limit itself labeled.
         decades = [t for t in (0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0,
                                10000.0) if t < time_limit]
         candidates = np.array(decades + [time_limit])
@@ -551,7 +551,7 @@ def pairwise_scatter(df, x=None, y=None, pairs=None,
     ``pairs`` takes a list of ``(x, y)`` tuples and lays the comparisons out as
     one grid -- a row per pair, a column per metric -- under a single legend,
     which is what a figure in a paper wants.  ``x`` and ``y`` on their own are
-    shorthand for one pair.  The colour and marker scales are built over every
+    shorthand for one pair.  The color and marker scales are built over every
     pair at once, so that one legend is true of all of them.
 
     ``log`` is either a flag for every metric or the names of the ones that
@@ -706,7 +706,7 @@ def pairwise_scatter(df, x=None, y=None, pairs=None,
     # A legend fills column-major, so laying the groups out as plain rows
     # would split one across two of them.  Pad each group to the same width
     # and interleave: with one column per entry, each group lands on its own
-    # row, markers above colours.
+    # row, markers above colors.
     handles, legend_columns = [], 1
     if groups:
         legend_columns = max(len(group) for group in groups)

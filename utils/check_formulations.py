@@ -95,7 +95,7 @@ from utils.instance_handler import create_and_save_instance  # noqa: E402
 # Cut types are listed as separate entries rather than combined: a combined
 # 'dual+enumerative' run can converge on the strength of the enumerative cut
 # alone, which would mask a defective dual cut. The same reasoning makes
-# '-dual-OC' the diagnostic entry for coefficient optimisation.
+# '-dual-OC' the diagnostic entry for coefficient optimization.
 CONFIGURATIONS = [
     ('ABF',             'arc',         False, False, None,               False),
     ('SBF',             'seq',         False, False, None,               False),
@@ -131,7 +131,7 @@ STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
 def is_bracketing(model_type, extended, decomposition):
     """
     Relaxations, which bracket the exact formulations rather than matching them
-    (see C6). Extended and non-decomposed, plus BS, whose cell discretisation
+    (see C6). Extended and non-decomposed, plus BS, whose cell discretization
     makes it inexact by construction: its bound is a relaxation and its tour is
     feasible but not necessarily optimal.
     """
@@ -160,6 +160,7 @@ def exact_tour_length(data, tour_arcs, mip_gap):
 
 def run_one(path, label, model_type, decomposition, extended, cut_type,
             optimize_coefficients, nu, time_limit, mip_gap):
+    """Solves one instance with one configuration and returns its record."""
     data = CETSPData.from_file(path)
     rec = {'formulation': label, 'status': None, 'ub': None, 'lb': None,
            'tour_len': None, 'ub_delta': None, 'runtime': None,
@@ -253,6 +254,7 @@ def check_cell(cell, rows, tol):
 
 
 def main():
+    """Runs the configurations on random instances and reports the checks."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--n', type=int, nargs='+', default=[6, 8])

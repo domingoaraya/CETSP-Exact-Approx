@@ -4,40 +4,35 @@ import sys
 
 from classes.cut_coefficients import MAX_ITER, fill_coefficients, pack_instance
 
-# Flag to warn only once when Gurobi ObjVal disagrees with the stored objective.
+# Warn only once per run when Gurobi's ObjVal disagrees with the stored objective.
 _objval_mismatch_warned = False
 
-# Numerical focus for arc SOCPs to avoid numerical issues. Value selected after careful testing. 
+# NumericFocus for the arc SOCPs; disabled after testing, kept for reference.
 #_ARC_NUMERIC_FOCUS = 2
 
 
 class CETSP_L2_Solver:
     """
-    A solver for the Close Enough Traveling Salesperson Problem (CETSP) with L2 norm.
-    This class is responsible for building the mathematical model in Gurobi.
+    Builds the Gurobi models of the CETSP formulations (ABF, SBF, PBF, BS),
+    their decomposition masters and subproblems, and the decomposition cuts.
     """
 
     def __init__(self, model, data, model_type, decomposition=False, extended=False, nu=None,
                  optimize_coefficients=False, threads=0, symmetry_breaking=True):
         """
-        Initializes the CETSP_L2_Solver.
-
         Args:
-            model (gurobipy.Model): The Gurobi model object.
-            data (CETSPData): The data for the CETSP instance.
-            model_type (str): The type of model to build ('arc' or 'seq').
-            decomposition (bool): Whether to use decomposition.
-            extended (bool): Whether to use the extended formulation.
-            nu (int): The parameter for the extended formulation.
-            optimize_coefficients (bool): Minimise the perspective dual cut's
-                coefficients on arcs outside the support instead of using the
-                trivial gamma = 0 completion.
-            threads (int): Gurobi Threads for every model built here. 0 lets
-                Gurobi choose.
-            symmetry_breaking (bool): Fix the orientation of the tour (depot's
-                successor has a smaller label than its predecessor). Valid for
-                any model solved from scratch; must be False for models whose
-                integer variables are fixed to a given tour (upper-bound SOCP).
+            model (gurobipy.Model): Gurobi model to build into.
+            data (CETSPData): instance data.
+            model_type (str): 'arc' (ABF), 'seq' (SBF), 'perspective' (PBF) or 'BS'.
+            decomposition (bool): build the decomposition master instead of the full model.
+            extended (bool): use the polyhedral approximation of the cones.
+            nu (int): approximation parameter of the extended models.
+            optimize_coefficients (bool): optimize the PBF dual cut coefficients on
+                arcs outside the support (PBF with dual cuts only).
+            threads (int): Gurobi threads for every model built here; 0 lets Gurobi choose.
+            symmetry_breaking (bool): fix the tour orientation (see
+                _create_symmetry_breaking_constraints). Must be False when x is
+                fixed to a given tour.
         """
         self.model = model
         self.data = data
@@ -49,20 +44,19 @@ class CETSP_L2_Solver:
         self.threads = threads
         self.optimize_coefficients = optimize_coefficients and model_type == 'perspective'
         self.symmetry_breaking = symmetry_breaking
-        # Gurobi status of the last subproblem that did not solve to optimality
+        # Gurobi status of the last subproblem that did not solve to optimality (None otherwise)
         self.last_subproblem_status = None
         if self.optimize_coefficients:
             self._centers, self._radii = pack_instance(data)
 
     def build(self):
         """
-        Builds the CETSP model by creating variables, constraints, and the objective function.
+        Builds the full formulation, the decomposition master or the BS master.
         """
         self.model.setParam('OutputFlag', 0)
         self.model.setParam('Threads', self.threads)
 
         #if self.model_type == 'arc' and not self.extended and not self.decomposition:
-            # Avoid numerical issues in arc-based SOCPs
         #    self.model.setParam('NumericFocus', _ARC_NUMERIC_FOCUS)
 
         if self.model_type == "BS":
@@ -91,20 +85,14 @@ class CETSP_L2_Solver:
 
     def build_tour_socp(self, tour_arcs):
         """
-        Builds the SOCP that prices a given tour (subproblem (7) of the paper):
-        one point per target in its disk, one distance per arc of the tour,
-        minimise the sum of distances. The tour may have either orientation.
-
-        Used to recompute the upper bound of an incumbent tour for the arc
-        family, instead of fixing x in the full ABF. The full model carries
-        n(n-1) distance cones and a big-M activation on every unused arc; the
-        tour SOCP has n + |tour| cones and no activation, so it is smaller and
-        its objective is the tour length up to plain conic tolerances, without
-        the big-M amplifying the feasibility tolerance (the MISOCP objective
-        has been observed up to 4e-4 below the true length of its own tour).
+        Builds the SOCP of a fixed tour: one point per target, one distance per
+        tour arc, minimize the sum. Used to price incumbents of the arc family
+        and BS instead of fixing x in the full ABF, which is larger and whose
+        big-M amplifies the conic tolerances (its objective has been observed
+        up to 4e-4 below the true tour length).
 
         Args:
-            tour_arcs (list): the arcs (i, j) of the tour.
+            tour_arcs (list): arcs (i, j) of the tour, in either orientation.
         """
         self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
         self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
@@ -120,21 +108,11 @@ class CETSP_L2_Solver:
 
     def _create_symmetry_breaking_constraints(self):
         """
-        Removes the reversal symmetry: every tour and its reverse have the same
-        length, and exactly one of the two has the depot's successor labelled
-        lower than its predecessor (n >= 3). Restricting to those tours leaves
-        the optimal value unchanged and halves the integer solutions.
-
-        Arc-based models (arc, perspective, BS): next(0) < prev(0), i.e.
-            sum_j j x_{0j} + 1 <= sum_i i x_{i0}.
-        Sequence model (seq): the successor is the node at position 1 and the
-        predecessor the node at position n-1, so
-            sum_i i z_{i,1} + 1 <= sum_i i z_{i,n-1}.
-        The implied fixings (the highest-labelled node is never the successor,
-        node 1 is never the predecessor) are imposed as bounds.
-
-        Not applied to models whose x is fixed to a given tour (compute_upper_bound,
-        check_formulations), where the tour may have the other orientation.
+        Fixes the tour orientation: the depot's successor has a smaller label
+        than its predecessor, which keeps exactly one of each tour and its
+        reverse (n >= 3). Arc-based models: sum_j j x_0j + 1 <= sum_i i x_i0;
+        sequence model: the same on positions 1 and n-1. The implied fixings
+        are set as bounds. Not for models whose x is fixed to a given tour.
         """
         n = self.n
         if n < 3:
@@ -155,8 +133,8 @@ class CETSP_L2_Solver:
 
     def _prepare_dual_cut_buffers(self):
         """
-        Preallocates the perspective dual cut's variable list and C array. Only
-        the coefficients change between callbacks.
+        Preallocates the variable list and coefficient array of the PBF dual
+        cut; only the coefficients change between callbacks.
         """
         pairs = [(i, j) for i in range(self.n) for j in range(self.n) if i != j]
         self._cut_rows = np.array([i for i, j in pairs], dtype=np.intp)
@@ -171,7 +149,7 @@ class CETSP_L2_Solver:
 
     def _build_bs_master_model(self):
         """
-        Builds the master problem for the Behdani & Smith (BS) formulation.
+        Builds the master problem of the BS decomposition.
         """
         self._create_variables()
         self._create_degree_constraints()
@@ -179,9 +157,9 @@ class CETSP_L2_Solver:
 
     def _create_variables(self):
         """
-        Creates the decision variables for the model.
+        Creates the decision variables.
         """
-        # Binary variables indicating the sequence of visited regions
+        # x[i, j]: arc (i, j) is used (arc-based models) or target i is at position j (seq)
         self.x = self.model.addVars(self.n, self.n, vtype=GRB.BINARY, name="x")
 
         if self.model_type == "BS":
@@ -194,22 +172,18 @@ class CETSP_L2_Solver:
             self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
         else:
             if not (self.decomposition and not self.extended):
-                # CONTINUOUS variables for the coordinates of the points in each region
+                # Visit point of each target (arc) or of each position (seq)
                 self.p_x = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_x")
                 self.p_y = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, name="p_y")
                 if self.model_type == 'arc':
                     self._apply_arc_point_bounds(self.p_x, self.p_y)
 
             if self.model_type == "arc":
-                # CONTINUOUS variables for the (activated) distance of each arc:
-                # d_ij = ||p_i - p_j|| if the tour uses (i, j), 0 otherwise. The
-                # big-M activation is folded into the distance constraint itself
-                # (see _create_distance_constraints), so no separate auxiliary
-                # variable is needed.
+                # Arc distance, 0 on unused arcs (activated in _create_distance_constraints)
                 if not (self.decomposition and not self.extended):
                     self.d = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="d")
             elif self.model_type == "seq":
-                # CONTINUOUS variables for the distance between points
+                # Distance between consecutive positions
                 if not (self.decomposition and not self.extended):
                     self.d = self.model.addVars(self.n, vtype=GRB.CONTINUOUS, name="d")
         
@@ -219,8 +193,8 @@ class CETSP_L2_Solver:
 
     def _apply_arc_point_bounds(self, p_x, p_y):
         """
-        Bound each arc point variable to the box c_i +/- r_i to improve conditioning 
-        and avoid problems with empty interior cones (depot).
+        Bounds each point to the box c_i +/- r_i; a target with r_i = 0 is
+        thereby fixed to its center, which avoids an empty-interior cone.
         """
         for i in range(self.n):
             cx, cy = self.data.centers[i]
@@ -230,40 +204,33 @@ class CETSP_L2_Solver:
 
     def _create_degree_constraints(self):
         """
-        Creates the degree and loop constraints.
+        Creates the degree (assignment) constraints and forbids self-loops in
+        the arc-based models.
         """
-        # Each region must be visited exactly once
         self.model.addConstrs((self.x.sum(i, '*') == 1 for i in range(self.n)), name="visit_once")
-        # Each position in the tour must be occupied by exactly one region
         self.model.addConstrs((self.x.sum('*', j) == 1 for j in range(self.n)), name="occupy_once")
-        # No self-loops for arc-based, BS, and perspective formulations
         if self.model_type in ['arc', 'BS', 'perspective']:
             self.model.addConstrs((self.x[i, i] == 0 for i in range(self.n)), name="no_self_loops")
         
     def _create_neighborhood_constraints(self):
         """
-        Creates the neighborhood constraints for the L2 norm.
-        These constraints ensure that the chosen points lie within their respective circular regions.
+        Creates the neighborhood constraints (each visit point inside its
+        disk), exact or polyhedrally approximated.
         """
         if not self.extended:
             if self.model_type == 'arc':
-                # radii[i] == 0 targets are already pinned to their center by
-                # _apply_arc_point_bounds
+                # Targets with r_i = 0 are fixed by _apply_arc_point_bounds
                 self.model.addConstrs(((self.p_x[i] - self.data.centers[i][0])**2 + (self.p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             elif self.model_type == 'seq':
-                # x[0,0] == 1 is fixed, if depot has radius 0, cone can be skipped
+                # The depot is fixed at position 0; with r_0 = 0 its cone reduces to fixing the point
                 depot_start = self.data.radii[0] == 0.0
                 positions = range(1, self.n) if depot_start else range(self.n)
                 if depot_start:
                     self.p_x[0].LB = self.p_x[0].UB = self.data.centers[0][0]
                     self.p_y[0].LB = self.p_y[0].UB = self.data.centers[0][1]
-                # Written as ||q_k|| <= rho_k with q_k and rho_k defined by linear
-                # equalities. Expanding ||p_k - sum_i x_ik c_i||^2 <= (sum_i x_ik r_i)^2
-                # directly produces bilinear terms p_k*x_ik and x_ik*x_lk, which
-                # Gurobi does not recognise as a second-order cone: it treats the
-                # constraint as non-convex and resorts to spatial branching (SOS
-                # constraints, extra binaries), which is both slower and
-                # numerically fragile.
+                # Stated on the auxiliaries q_k = p_k - sum_i x_ik c_i and
+                # rho_k = sum_i x_ik r_i: the expanded form has bilinear x*p and
+                # x*x terms that Gurobi does not recognize as a second-order cone.
                 self.q_seq = self.model.addVars(positions, 2, lb=-GRB.INFINITY, name="q_nbhd")
                 self.rho_seq = self.model.addVars(positions, lb=0.0, name="rho_nbhd")
                 self.model.addConstrs((self.q_seq[k, 0] == self.p_x[k] - quicksum(self.x[i, k] * self.data.centers[i][0] for i in range(self.n))
@@ -275,13 +242,8 @@ class CETSP_L2_Solver:
                 self.model.addConstrs((self.q_seq[k, 0]**2 + self.q_seq[k, 1]**2 <= self.rho_seq[k]**2
                                        for k in positions), name="neighborhood")
             elif self.model_type == 'perspective':
-                # A zero-radius target (the depot) turns its cone into
-                # ||p - x c|| <= 0, an empty-interior constraint with no strictly
-                # feasible point for the barrier. Those points can be fixed
-                # Same reformulation as in the sequence model: the perspective cone
-                # ||p - x c|| <= r x is stated on q = p - x c (linear equality) so that
-                # the quadratic constraint ||q||^2 <= (r x)^2 has no bilinear p*x
-                # terms and Gurobi handles it as a second-order cone.
+                # Same reformulation on q = p - x c. Targets with r = 0 (the
+                # depot) get the linear constraint p = x c instead of a cone.
                 arcs_i = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[i] > 0.0]
                 arcs_j = [(i, j) for i in range(self.n) for j in range(self.n) if i != j and self.data.radii[j] > 0.0]
                 self.q_i = self.model.addVars(arcs_i, 2, lb=-GRB.INFINITY, name="q_i")
@@ -302,16 +264,13 @@ class CETSP_L2_Solver:
 
     def _create_distance_constraints(self):
         """
-        Creates the distance constraints for the L2 norm.
-        These constraints define the distance between consecutive points in the tour.
+        Creates the distance constraints (distance variables at least the
+        distance between consecutive visit points), exact or approximated.
         """
         if not self.extended:
             if self.model_type == 'arc':
-                # ||p_i - p_j|| <= d_ij + M_ij (1 - x_ij): the cone and the big-M
-                # activation as a single constraint. Written on the auxiliary
-                # t_ij = d_ij + M_ij (1 - x_ij) (linear equality) so that the
-                # quadratic constraint ||p_i - p_j||^2 <= t_ij^2 has no products
-                # d_ij * x_ij and Gurobi handles it as a second-order cone.
+                # ||p_i - p_j|| <= d_ij + M_ij (1 - x_ij), stated on the auxiliary
+                # t_ij = d_ij + M_ij (1 - x_ij) so that the cone has no d*x terms
                 M = self._compute_big_m()
                 self.t_arc = self.model.addVars(self.n, self.n, lb=0.0, name="t_dist")
                 self.model.addConstrs((self.t_arc[i, j] == self.d[i, j] + M[i, j] * (1 - self.x[i, j])
@@ -327,10 +286,11 @@ class CETSP_L2_Solver:
 
     def _create_approximated_socp_constraints(self, constraint_type):
         """
-        Creates polyhedral approximations of the second-order cone constraints.
+        Creates the polyhedral approximation of the second-order cone
+        constraints (Ben-Tal and Nemirovski, parameter nu).
 
         Args:
-            constraint_type (str): The type of constraint to approximate ('neighborhood' or 'distance').
+            constraint_type (str): 'neighborhood' or 'distance'.
         """
         if constraint_type == 'neighborhood':
             if self.model_type in ['arc', 'seq']:
@@ -411,9 +371,7 @@ class CETSP_L2_Solver:
                 self.model.addConstrs(eta_d[i,j,k] >= -np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] + np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
                 self.model.addConstrs(eta_d[i,j,k] >= np.sin(np.pi * 2**(-(k+1))) * xi_d[i,j,k-1] - np.cos(np.pi * 2**(-(k+1))) * eta_d[i,j,k-1] for i in range(self.n) for j in range(self.n) for k in range(1, self.nu + 1))
 
-                # (p_i - p_j, d_ij + M_ij (1 - x_ij)) in P_eps(nu): the big-M
-                # activation enters the last inequality of the approximation
-                # directly, which is linear, so no auxiliary variable is needed.
+                # The big-M activation enters the last layer directly (it is linear)
                 M = self._compute_big_m()
                 self.model.addConstrs(xi_d [i,j,self.nu] <= self.d[i,j] + M[i,j] * (1 - self.x[i,j]) for i in range(self.n) for j in range(self.n))
                 self.model.addConstrs(eta_d[i,j,self.nu] <= np.tan(np.pi * 2**(-(self.nu + 1))) * xi_d[i,j,self.nu] for i in range(self.n) for j in range(self.n))
@@ -460,14 +418,14 @@ class CETSP_L2_Solver:
 
     def _build_decomposition_model(self):
         """
-        Builds the master problem for the Benders decomposition.
+        Builds the decomposition master problem.
         """
         self._create_variables()
         self._create_degree_constraints()
 
         if self.extended:
-            # The formulation-specific parts carry their own subtour
-            # elimination (arc, perspective) or depot fixing (seq).
+            # The formulation-specific parts include subtour elimination (arc,
+            # perspective) or the depot fixing (seq).
             if self.model_type == "arc":
                 self._create_arc_formulation_specific_parts()
             elif self.model_type == "seq":
@@ -484,13 +442,9 @@ class CETSP_L2_Solver:
         
     def _subproblem_objective(self, sub_model):
         """
-        Read the subproblem objective without trusting Model.ObjVal.
-
-        Gurobi 12.0.2 has been observed to return ObjVal with the wrong sign on
-        the maximization QCP subproblems while the returned point is itself
-        correct and optimal. getObjective().getValue() re-evaluates the stored
-        objective at that point, so it cannot disagree with the model. ObjVal is
-        still read, purely to report the discrepancy if it appears.
+        Objective value of a solved subproblem, re-evaluated from the stored
+        objective. Gurobi 12.0.2 has returned ObjVal with the wrong sign on the
+        maximization QCP subproblems; a mismatch is reported once per run.
         """
         val = sub_model.getObjective().getValue()
         try:
@@ -509,25 +463,19 @@ class CETSP_L2_Solver:
 
     def _solve_subproblem(self, x_sol, current_estimation):
         """
-        Solves the subproblem for a given integer solution.
+        Solves the decomposition subproblem for an integer master solution.
 
         Args:
-            x_sol (dict): A dictionary with the values of the x variables.
-            current_estimation (float): The part of the master objective other
-                than theta at x_sol: sum E_ij x_ij on the plain arc/perspective
-                masters, sum d on the extended masters, 0 on the plain sequence
-                master. The subproblem value is Q = (tour length) - current_estimation
-                on every route, so that theta >= Q is the Benders condition.
+            x_sol (dict): values of the x variables.
+            current_estimation (float): master objective at x_sol without theta,
+                so that the subproblem value is Q = (tour length) - current_estimation
+                and theta >= Q is the optimality condition.
 
         Returns:
-            A tuple (sub_obj, duals). Every route follows the same contract:
-            - solved to optimality: sub_obj = Q(x_sol), last_subproblem_status is None;
-            - usable but weak (status SUBOPTIMAL with a solution on the dual
-              subproblems, with a finite ObjBound on the primal one): sub_obj is a
-              lower bound on Q, the cut built from it is valid, and
-              last_subproblem_status holds the Gurobi status so the caller can
-              tell the value is weak;
-            - no usable information: (None, None), with last_subproblem_status set.
+            (sub_obj, duals): sub_obj = Q if the subproblem solved to optimality;
+            a lower bound on Q, with last_subproblem_status set, if only a
+            suboptimal solution is available (the cut built from it is still
+            valid); (None, None) if there is no usable information.
         """
         self.last_subproblem_status = None
         sub_model = Model("subproblem")
@@ -550,15 +498,10 @@ class CETSP_L2_Solver:
             sub_model.addConstrs(((p_x[i] - self.data.centers[i][0])**2 + (p_y[i] - self.data.centers[i][1])**2 <= self.data.radii[i]**2 for i in range(self.n) if self.data.radii[i] > 0.0), name="neighborhood")
             sub_model.addConstrs((d[i,j]**2 >= (p_x[i] - p_x[j])**2 + (p_y[i] - p_y[j])**2 for i,j in tour_arcs), name="distance")
 
-            # Q = tour length - current_estimation on both the plain master
-            # (current_estimation = sum E_ij x_ij) and the extended one (sum d).
             sub_model.setObjective(quicksum(d[i,j] for i,j in tour_arcs) - current_estimation, GRB.MINIMIZE)
             sub_model.optimize()
-            # Primal minimization: a suboptimal solve returns Q >= Q*, and the
-            # enumerative cut built from it would remove a feasible point. Its
-            # bound ObjBound <= Q*, however, is safe: the enumerative cut with
-            # Q_lb in place of Q is valid (weaker), and it is still violated
-            # whenever theta_hat < Q_lb.
+            # A suboptimal primal overestimates Q and would make the enumerative
+            # cut invalid; its ObjBound is a safe lower bound.
             if sub_model.status == GRB.OPTIMAL:
                 return self._subproblem_objective(sub_model), {}
             self.last_subproblem_status = sub_model.status
@@ -591,14 +534,11 @@ class CETSP_L2_Solver:
             sub_model.addConstrs(rho_d[k,0]**2 + rho_d[k,1]**2 <= lambda_d[k]**2 for k in range(self.n))
             sub_model.addConstrs(rho_c[k,0]**2 + rho_c[k,1]**2 <= lambda_c[k]**2 for k in range(self.n))
 
-            # Q = tour length - current_estimation (0 on the plain sequence
-            # master, whose objective is theta alone; sum d on the extended one).
+            # Dual of the fixed-sequence subproblem (see the paper), shifted by -current_estimation
             sub_model.setObjective(quicksum(mu[i,k]*x_sol[i,k] for i in range(self.n) for k in range(self.n)) - current_estimation, GRB.MAXIMIZE)
             sub_model.optimize()
 
-            # Dual maximization: any feasible dual point gives a valid cut whose
-            # value at x_hat is a lower bound on Q*, so a suboptimal solve with
-            # a solution is still usable (the cut is just weaker).
+            # Any feasible dual point gives a valid (weaker) cut
             if sub_model.status != GRB.OPTIMAL:
                 self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
@@ -608,7 +548,6 @@ class CETSP_L2_Solver:
         elif self.model_type == 'perspective':
             tour_arcs = [(i, j) for i in range(self.n) for j in range(self.n) if x_sol[i, j] > 0.5 and i != j]
 
-            # Map previous and next nodes for reduced dual constraints
             nxt = {}
             prv = {}
             for i, j in tour_arcs:
@@ -627,10 +566,8 @@ class CETSP_L2_Solver:
                 name="tau_bound"
             )
             
-            # Dual objective: sum over the tour of (c_i - c_j).gamma_ij minus the
-            # tau terms is the tour length; the constant below turns it into
-            # Q = length - current_estimation, as on the arc and sequence routes
-            # (on the plain master current_estimation = sum E_ij over the tour).
+            # Reduced dual of the fixed-sequence subproblem (see the paper),
+            # shifted by -current_estimation
             obj = LinExpr()
             for i, j in tour_arcs:
                 obj.addTerms([self.data.centers[i][0] - self.data.centers[j][0],
@@ -643,20 +580,18 @@ class CETSP_L2_Solver:
             sub_model.setObjective(obj, GRB.MAXIMIZE)
             sub_model.optimize()
 
-            # As in the sequence case: a feasible dual point is enough for a valid cut.
+            # Any feasible dual point gives a valid (weaker) cut
             if sub_model.status != GRB.OPTIMAL:
                 self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL or (sub_model.status == GRB.SUBOPTIMAL and sub_model.SolCount > 0):
-                # Extract gamma
                 gamma_vals = {(i, j, dim): gamma[i, j, dim].X for i, j in tour_arcs for dim in range(2)}
                 
-                # Reconstruct eta
+                # Recover eta, alpha and lambda from gamma
                 eta_vals = np.zeros((self.n, 2))
                 for i in range(self.n):
                     for dim in range(2):
                         eta_vals[i, dim] = 0.5 * (gamma_vals[i, nxt[i], dim] + gamma_vals[prv[i], i, dim])
                 
-                # Reconstruct alpha and lambda
                 alpha_i_vals = {}
                 alpha_j_vals = {}
                 lambda_i_vals = {}
@@ -729,8 +664,7 @@ class CETSP_L2_Solver:
 
             sub_model.optimize()
 
-            # The BS cut needs the LP duals, which Gurobi only provides on an
-            # optimal solve: no weak variant here.
+            # The BS cut needs the LP duals, available only on an optimal solve
             if sub_model.status != GRB.OPTIMAL:
                 self.last_subproblem_status = sub_model.status
             if sub_model.status == GRB.OPTIMAL:
@@ -738,9 +672,8 @@ class CETSP_L2_Solver:
                 pi_tau = sink_constr.Pi
                 f_sol = {key: f_vars[key].X for key in c_cap}
 
-                # Node potentials. The depot's cell is the source when an arc
-                # leaves it and the sink when an arc enters it, so it is not in
-                # flow_c; the cut builder supplies 0 and pi_tau for those.
+                # Node potentials; the depot's cell (source and sink) is not in
+                # flow_c, and the cut builder uses 0 and pi_tau for it.
                 pi = {delta: c.Pi for delta, c in flow_c.items()}
 
                 duals = {
@@ -754,17 +687,15 @@ class CETSP_L2_Solver:
 
     def _add_decomposition_cuts(self, x_sol, sub_obj, duals, cut_type='enumerative'):
         """
-        Adds decomposition cuts (Benders and/or integer optimality cuts) to the master problem.
+        Adds the decomposition cuts for an integer master solution as lazy
+        constraints. Unless symmetry_breaking is set, each cut is also added
+        for the reverse tour.
 
         Args:
-            x_sol (dict): A dictionary with the values of the x variables.
-            sub_obj (float): The objective value of the subproblem.
-            duals (dict): The dual variables from the subproblem.
-            cut_type (str): The type of cut to add ('dual', 'enumerative', or 'dual+enumerative').
-
-        Every cut is also added for the reverse tour unless symmetry_breaking
-        is set: the orientation constraint then makes the reverse tour
-        infeasible for the master, so its cut is not separated.
+            x_sol (dict): values of the x variables.
+            sub_obj (float): subproblem value Q at x_sol (or a lower bound on it).
+            duals (dict): subproblem duals, as returned by _solve_subproblem.
+            cut_type (str): 'dual', 'enumerative' or 'dual+enumerative'.
 
         Returns:
             int: number of cuts added.
@@ -772,7 +703,7 @@ class CETSP_L2_Solver:
         add_reverse = not self.symmetry_breaking
         n_added = 0
 
-        # Avoid numerical issues
+        # Q >= 0 on tours; clip rounding noise
         sub_obj = max(0.0, sub_obj)
 
         if self.model_type == 'arc':
@@ -789,6 +720,7 @@ class CETSP_L2_Solver:
                 delta += (1 - self.x[i,j])
                 delta_rev += (1 - self.x[j,i])
 
+            # Coefficient Q/3: two distinct tours differ in at least three arcs of the support
             self.model.cbLazy(-(sub_obj/3)*delta + sub_obj <= self.theta)
             n_added += 1
             if add_reverse:
@@ -797,10 +729,8 @@ class CETSP_L2_Solver:
 
         elif self.model_type == 'seq':
             if 'dual' in cut_type:
-                # Cut (14)/(17) for z_hat and for its reverse sequence. Reversing the
-                # visit order maps position k to (n - k) mod n (depot fixed at 0);
-                # relabelling the dual accordingly (rho^d with a sign flip) keeps
-                # it feasible and optimal, so mu'_{i,k} = mu_{i,(n-k) mod n}.
+                # The reverse sequence maps position k to (n - k) mod n (depot
+                # fixed at 0); its dual is mu with the columns permuted accordingly
                 positions = [lambda k: k]
                 if add_reverse:
                     positions.append(lambda k: (self.n - k) % self.n)
@@ -826,6 +756,7 @@ class CETSP_L2_Solver:
                     else:
                         delta_rev += (1 - self.x[i,k])
                 
+                # Coefficient Q/2: two distinct sequences differ in at least two assignments of the support
                 self.model.cbLazy(-(sub_obj/2)*delta + sub_obj <= self.theta)
                 n_added += 1
                 if add_reverse:
@@ -837,7 +768,8 @@ class CETSP_L2_Solver:
             tour_arcs_set = set(tour_arcs)
 
             if 'dual' in cut_type:
-                # Compute C_ij for all i != j
+                # C_ij on the support from the duals, elsewhere from the
+                # optimized or the plain (gamma = 0) completion
                 eta_vals = duals['eta']
                 alpha_i_vals = duals['alpha_i']
                 alpha_j_vals = duals['alpha_j']
@@ -873,12 +805,8 @@ class CETSP_L2_Solver:
                                        - self.data.centers[j][1] * eta_j_1
                                        + norm_eta_j * self.data.radii[j])
 
-                # Cut for x_hat, and the cut for its reverse tour. If (eta, gamma) is
-                # optimal for x_hat, then (-eta, -gamma) with gamma'_{ji} = -gamma_{ij}
-                # is optimal for the reverse tour and yields C'_{ji} = C_{ij}: the
-                # coefficient matrix of the reverse cut is the transpose, in both the
-                # plain and the optimised completion (the completion problem (11)
-                # for (j, i) with anchors -eta is (11) for (i, j) under gamma -> -gamma).
+                # The reverse tour's dual is (-eta, -gamma) with gamma'_ji = -gamma_ij,
+                # so its coefficient matrix is the transpose of C
                 for coef_mat in ((C, C.T) if add_reverse else (C,)):
                     if not self.extended:
                         coeffs = (-(self.estimation + coef_mat))[self._cut_rows, self._cut_cols].tolist()
@@ -909,15 +837,15 @@ class CETSP_L2_Solver:
 
     def _generate_bs_cut_expr(self, x_sol, duals):
         """
-        Generates the linear expression (LHS) and bound (RHS) for a Behdani & Smith (BS) cut.
-        Does not interact directly with the Gurobi model or callbacks.
+        Builds the BS cut lhs >= rhs from the subproblem duals, without
+        touching the model.
 
         Args:
-            x_sol (dict): Binary arc solution mapping (i, j) to 0 or 1.
-            duals (dict): The dual variables from the subproblem.
+            x_sol (dict): values of the x variables.
+            duals (dict): subproblem duals, as returned by _solve_subproblem.
 
         Returns:
-            tuple: (lhs, rhs) where lhs is a Gurobi LinExpr and rhs is a float, or (None, None) if invalid.
+            (lhs, rhs): a LinExpr and a float, or (None, None) if duals are missing.
         """
         if not duals or 'pi_tau' not in duals:
             return None, None
@@ -970,7 +898,7 @@ class CETSP_L2_Solver:
         """
         self._create_subtour_elimination_constraints()
         self._create_neighborhood_constraints()
-        self._create_distance_constraints()   # includes the big-M activation
+        self._create_distance_constraints()
 
     def _create_seq_formulation_specific_parts(self):
         """
@@ -991,13 +919,13 @@ class CETSP_L2_Solver:
 
     def _create_perspective_continuity_constraints(self):
         """
-        Creates position continuity constraints for the PBF model.
+        Creates the PBF continuity constraints: each target is entered and left at the same point.
         """
         self.model.addConstrs((quicksum(self.p_j[i, j, dim] for i in range(self.n) if i != j) == quicksum(self.p_i[j, k, dim] for k in range(self.n) if k != j) for j in range(self.n) for dim in range(2)), name="continuity_perspective")
 
     def _create_subtour_elimination_constraints(self):
         """
-        Creates subtour elimination constraints (SCF formulation).
+        Creates the single-commodity-flow subtour elimination constraints.
         """
         u = self.model.addVars(self.n, self.n, vtype=GRB.CONTINUOUS, name="u")
         self.model.addConstrs((u.sum(i, '*') - u.sum('*', i) == -1 for i in range(1, self.n)), name="subtour_elim_flow")
@@ -1006,7 +934,9 @@ class CETSP_L2_Solver:
 
     def _compute_big_m(self):
         """
-        Computes the Big-M values for the linearization.
+        Big-M of the arc distance activation: the largest distance between two
+        points of disks i and j, scaled by the approximation factor in the
+        extended models.
         """
         M = np.zeros((self.n, self.n))
 
@@ -1022,7 +952,7 @@ class CETSP_L2_Solver:
 
     def _compute_distance_estimations(self):
         """
-        Computes the minimum possible distance between two neighborhoods for the L2 norm.
+        Distance estimate m_ij of the master problem: the minimum distance between disks i and j.
         """
         self.estimation = np.zeros((self.n, self.n))
         for i in range(self.n):
@@ -1032,7 +962,7 @@ class CETSP_L2_Solver:
 
     def _set_objective(self):
         """
-        Sets the objective function for the model.
+        Sets the objective: total distance, plus theta in the decomposition masters.
         """
         if self.model_type == 'BS':
             self._compute_distance_estimations()

@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Full experiment: for each n in N_LIST, each instance configuration
-# (r_mean, sigma) and each solver configuration, solve INSTANCES repetitions
-# and write one CSV per triple to
-#     Results/n<n>/<label>/r<r_mean>_s<sigma>.csv        (INSTANCES rows)
+# Runs every solver configuration in CONFIGS on every instance configuration
+# (r_mean, sigma) for every n in N_LIST, INSTANCES repetitions each, and
+# writes one CSV per (n, solver, instance configuration) to
+#     Results/n<n>/<label>/r<r_mean>_s<sigma>.csv
 # with the Gurobi log of each instance in logs/gurobi/n<n>/ and the process
 # output in logs/n<n>/<label>__r<r_mean>_s<sigma>.log.
 #
-# Jobs are handed out from a dynamic queue to the CPU sets in CPUSETS
-# (taskset), in order: all n=10 jobs first, then n=15, then n=20; within each
-# n, by solver configuration in CONFIGS order. A CSV with INSTANCES rows counts
-# as complete, so rerunning the script resumes only what is pending. All
-# parameters live in this file; the script takes no arguments.
+# Jobs are handed out from a queue to the CPU sets in CPUSETS (taskset), in
+# N_LIST order and then in CONFIGS order. A CSV with INSTANCES rows is
+# complete, so rerunning the script resumes only what is pending. The script
+# takes no arguments: all parameters are set below.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -28,9 +27,9 @@ CPUSETS=(
   "12,13,28,29"
   "14,15,30,31"
 )
-THREADS=4          # Gurobi threads per job (= CPUs in each set)
+THREADS=4          # Gurobi threads per job (CPUs per set)
 
-# Instance configurations: "r_mean sigma" (the paper's grid).
+# Instance configurations: "r_mean sigma".
 INSTANCE_CONFIGS=(
   "0.25 0"
   "0.25 0.2"
@@ -43,14 +42,10 @@ INSTANCE_CONFIGS=(
   "1 0.5"
 )
 
-# Solver configurations: "label|flags", in alphabetical order by label. Comment
-# out the ones you don't want to run. Lists every combination run_experiment.py
-# can generate (82):
-# model x {A} x {D, cut type} x {S} x {OC} x {B}, with -S only for ABF/PBF,
-# -OC only for PBF-D with dual cuts, and -B (symmetry breaking, no reverse-tour
-# cuts) for all of them; each entry is followed by its -B variant. Each label
-# matches the one run_experiment.py prints for those flags (check with
-# --amount_of_instances 0).
+# Solver configurations: "label|flags", alphabetical by label; comment out the
+# ones not to run. Labels are the ones run_experiment.py prints for the flags
+# (-A approximate, -D decomposition with its cut type, -S DFJ cuts, -OC
+# optimized coefficients, -B symmetry breaking).
 CONFIGS=(
   "ABF|--model_type arc --decomposition False --extended False --strengthen False --optimize_coefficients False --symmetry_breaking False"
   "ABF-A|--model_type arc --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking False"
@@ -163,8 +158,7 @@ for n in "${N_LIST[@]}"; do
 done
 echo "total: $(wc -l < "$QUEUE") of $total jobs pending  (each job = $INSTANCES instances, $TIME_LIMIT s limit)"
 
-# Generate every instance before launching, so that several processes never
-# write the same file at once. Same formulas as run_experiment.py.
+# Generate every instance up front so that no two workers write the same file.
 python - "$INSTANCES" "${N_LIST[@]}" -- "${INSTANCE_CONFIGS[@]}" <<'PY'
 import os, sys
 from utils.instance_handler import create_and_save_instance
@@ -207,7 +201,7 @@ worker() {  # worker <cpuset>
   echo "[$(date '+%F %T')] $tag no work left, exiting"
 }
 
-# Ctrl-C or kill on the launcher also stops the workers and Gurobi.
+# Ctrl-C or kill on the launcher stops the workers and Gurobi too.
 trap 'echo "interrupted, stopping workers"; trap - INT TERM; kill 0' INT TERM
 
 for cs in "${CPUSETS[@]}"; do

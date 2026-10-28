@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Progress of the launch.sh experiment: completed jobs (triples) per n and per solver.
+# Progress of a launch*.sh experiment: complete CSVs (INSTANCES rows) per n and per solver.
 cd "$(dirname "$0")"
 INSTANCES=5
 for d in Results/n*/; do

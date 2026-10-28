@@ -5,18 +5,16 @@ from utils.instance_handler import read_instance
 
 class CETSPData:
     """
-    Represents the data for a Close Enough Traveling Salesperson Problem (CETSP) instance.
-    This class stores the problem's parameters and provides methods for data preprocessing.
+    A CETSP instance: disk centers and radii, with the preprocessing and the
+    boundary-cell discretization used by BS.
     """
 
     def __init__(self, n, centers, radii):
         """
-        Initializes the CETSPData object.
-
         Args:
-            n (int): The number of regions (neighborhoods).
-            centers (dict): A dictionary mapping region indices to their center coordinates (e.g., {0: (x0, y0), 1: (x1, y1), ...}).
-            radii (dict): A dictionary mapping region indices to their radii (e.g., {0: r0, 1: r1, ...}).
+            n (int): number of targets.
+            centers (dict): target index -> (x, y).
+            radii (dict): target index -> radius.
         """
         self.n = n
 
@@ -40,7 +38,7 @@ class CETSPData:
     @classmethod
     def from_file(cls, file_path):
         """
-        Creates a CETSPData object from an instance file.
+        Reads an instance file (see utils.instance_handler).
         """
         n, centers, radii = read_instance(file_path)
         return cls(n, centers, radii)
@@ -48,9 +46,8 @@ class CETSPData:
 
     def eliminate_redundancies(self):
         """
-        Identifies and handles redundant regions for the L2 norm.
-        A region is considered redundant if it completely contains another region.
-        This method updates the number of regions, centers, and radii to reflect the non-redundant set.
+        Removes every disk that contains another disk (visiting the inner one
+        visits it too) and renumbers the remaining targets consecutively.
         """
 
         self.redundancies = []
@@ -58,12 +55,9 @@ class CETSPData:
         for i in range(self.n):
             for j in range(self.n):
                 if i != j:
-                    # Condition for L2 norm: check whether region j is inside region i.
-                    # If disk_j is contained in disk_i then every point of disk_j is
-                    # also in disk_i, so visiting j automatically satisfies i.
                     distance_sq = (self.centers[i][0] - self.centers[j][0])**2 + (self.centers[i][1] - self.centers[j][1])**2
 
-                    # In case both regions are equal
+                    # Identical disks: keep the one with the smaller index
                     if distance_sq == 0 and self.radii[j] == self.radii[i] and i < j:
                         continue
                     if np.sqrt(distance_sq) + self.radii[j] <= self.radii[i]:
@@ -72,26 +66,21 @@ class CETSPData:
         if not self.redundancies:
             return
 
-        # Remove duplicates from redundancies list
         self.redundancies = list(set(self.redundancies))
 
-        # Separate non-redundant and redundant elements
         non_redundant_centers = {k: v for k, v in self.centers.items() if k not in self.redundancies}
         
         non_redundant_radii = {k: v for k, v in self.radii.items() if k not in self.redundancies}
 
-        # Reassign keys for centers and radii to be consecutive
         self.centers = {new_key: value for new_key, value in enumerate(non_redundant_centers.values())}
         self.radii = {new_key: value for new_key, value in enumerate(non_redundant_radii.values())}
 
-        # Update the number of regions
         self.n = len(self.centers)
 
 
     def compute_min_max_coords(self):
         """
-        Computes the minimum and maximum x and y coordinates that bound all regions.
-        This is useful for setting plot limits.
+        Bounding box of the disks (used for plot limits).
         """
         if not self.centers:
             self.min_coord_x, self.max_coord_x, self.min_coord_y, self.max_coord_y = 0, 0, 0, 0
@@ -104,6 +93,7 @@ class CETSPData:
 
     @staticmethod
     def _get_endpoints(cell):
+        """Endpoints of a boundary cell (an arc of a disk)."""
         c = cell['center']
         r = cell['radius']
         s = cell['start_angle']
@@ -114,15 +104,18 @@ class CETSPData:
 
     @staticmethod
     def _is_angle_in_arc(theta, start, end):
+        """Whether angle theta lies in the arc [start, end] (end may exceed 2 pi)."""
         norm_theta = (theta - start) % (2 * np.pi) + start
         return norm_theta <= end + 1e-9
 
     def initialize_bs_cells(self, N_prime=4):
         """
-        Initializes the cell discretization of disk boundaries intersecting conv(M U {p_0}).
+        Discretizes the part of each disk boundary that lies inside the convex
+        hull of the centers into N_prime cells (arcs), as in BS, and computes
+        the cell-to-cell distances.
 
         Args:
-            N_prime (int): Number of sub-arcs/cells per target disk angle interval. Defaults to 4.
+            N_prime (int): cells per boundary arc.
         """
         self.bs_cells = {}
         self.bs_distances = {}
@@ -195,14 +188,14 @@ class CETSPData:
                     mid_angle = (a1 + a2) / 2.0
                     mid_pt = center + radius * np.array([np.cos(mid_angle), np.sin(mid_angle)])
                     
-                    # Pure NumPy half-space inequality check
+                    # Midpoint inside the hull
                     if np.all(np.dot(hull.equations[:, :-1], mid_pt) + hull.equations[:, -1] <= 1e-6):
                         valid_arcs.append((a1, a2))
 
                 if len(valid_arcs) == 0:
                     arcs = [(0.0, 2 * np.pi)]
                 else:
-                    # Keep every valid arc; the pair wrapping through 0 is one arc.
+                    # Keep every arc inside the hull; the two pieces wrapping through 0 are one arc
                     arcs = list(valid_arcs)
                     if (len(arcs) >= 2 and np.isclose(arcs[0][0], 0.0)
                             and np.isclose(arcs[-1][1], 2 * np.pi)):
@@ -224,11 +217,15 @@ class CETSPData:
                     }
                     cell_idx += 1
 
-        # Compute distances for all initial cells
         if self.bs_cells:
             self._compute_arc_distances(list(self.bs_cells.keys()))
 
     def _calc_single_pair_dist(self, delta, sigma):
+        """
+        Minimum distance between two boundary cells, in closed form: the
+        candidates are the arc intersections, the pairs collinear with the
+        centers, each endpoint against the other arc, and the endpoint pairs.
+        """
         i, c1 = delta
         j, c2 = sigma
 
@@ -243,7 +240,7 @@ class CETSPData:
         C_i = np.array(cell1['center'], dtype=float)
         C_j = np.array(cell2['center'], dtype=float)
 
-        # Point targets case
+        # Point targets
         if r_i == 0.0 and r_j == 0.0:
             return float(np.linalg.norm(C_i - C_j))
 
@@ -274,10 +271,10 @@ class CETSPData:
                 d2 = np.linalg.norm(point - ep2)
                 return float(min(d1, d2))
 
-        # Two Arcs case
+        # Two arcs
         D = np.linalg.norm(C_j - C_i)
 
-        # Arc Intersection Check
+        # Arc intersections
         if D > 0 and abs(r_i - r_j) <= D <= r_i + r_j:
             a = (r_i**2 - r_j**2 + D**2) / (2.0 * D)
             h_sq = r_i**2 - a**2
@@ -299,12 +296,12 @@ class CETSPData:
 
         min_dist = float('inf')
 
-        # a) Line of Centers
+        # a) Pairs collinear with the centers
         if D > 0:
             theta_ij = np.arctan2(C_j[1] - C_i[1], C_j[0] - C_i[0])
             theta_ji = np.arctan2(C_i[1] - C_j[1], C_i[0] - C_j[0])
-            # Either point may face the other centre or face away from it; the
-            # same-side pairs are the minimisers when one disc lies inside the other.
+            # Each point may face the other center or face away from it; the
+            # same-side pairs are the minimizers when one disk lies inside the other
             for s_i, s_j, val in ((0.0, 0.0, abs(D - r_i - r_j)),
                                   (0.0, np.pi, abs(D - r_i + r_j)),
                                   (np.pi, 0.0, abs(D + r_i - r_j))):
@@ -312,7 +309,7 @@ class CETSPData:
                    self._is_angle_in_arc(theta_ji + s_j, cell2['start_angle'], cell2['end_angle']):
                     min_dist = min(min_dist, val)
 
-        # b) Endpoints to Opposing Arc
+        # b) Endpoints against the other arc
         ep1_i, ep2_i = self._get_endpoints(cell1)
         for E in [ep1_i, ep2_i]:
             theta_j = np.arctan2(E[1] - C_j[1], E[0] - C_j[0])
@@ -327,7 +324,7 @@ class CETSPData:
                 dist = abs(np.linalg.norm(E - C_i) - r_i)
                 min_dist = min(min_dist, dist)
 
-        # c) Endpoint to Endpoint
+        # c) Endpoint pairs
         for p_i in [ep1_i, ep2_i]:
             for p_j in [ep1_j, ep2_j]:
                 dist = np.linalg.norm(p_i - p_j)
@@ -337,10 +334,11 @@ class CETSPData:
 
     def _compute_arc_distances(self, new_cells=None):
         """
-        Computes minimum continuous arc-to-arc distances using exact O(1) geometry.
-        
+        Computes the cell-to-cell distances for new_cells (all cells if None)
+        against every other cell.
+
         Args:
-            new_cells (list, optional): List of new cell keys (target_idx, cell_idx) to compute distances for.
+            new_cells (list): cell keys (target_idx, cell_idx).
         """
         if new_cells is None:
             all_keys = list(self.bs_cells.keys())
@@ -364,10 +362,10 @@ class CETSPData:
 
     def refine_bs_cells(self, active_cells):
         """
-        Refines active cells by bisecting their angle intervals into child cells.
+        Bisects the given cells; the first child keeps the parent's key.
 
         Args:
-            active_cells (list): List of (target_idx, cell_idx) tuples corresponding to active cells.
+            active_cells (list): cell keys (target_idx, cell_idx).
         """
         new_cell_keys = []
         for target_idx, cell_idx in active_cells:
@@ -379,14 +377,11 @@ class CETSPData:
             if cell['radius'] == 0.0 or cell['start_angle'] == cell['end_angle']:
                 continue
 
-            # Compute midpoint angle
             mid_angle = (cell['start_angle'] + cell['end_angle']) / 2.0
 
-            # Find maximum cell_idx for target_idx to assign new contiguous keys
             existing_indices = [c_idx for t_idx, c_idx in self.bs_cells.keys() if t_idx == target_idx]
             max_idx = max(existing_indices) if existing_indices else cell_idx
 
-            # Child 1 replaces parent, Child 2 is assigned max_idx + 1
             child1_key = cell_key
             child2_key = (target_idx, max_idx + 1)
 
@@ -408,7 +403,6 @@ class CETSPData:
 
             new_cell_keys.extend([child1_key, child2_key])
 
-        # Call distance calculation for newly generated cells
         if new_cell_keys:
             try:
                 self._compute_arc_distances(new_cell_keys)

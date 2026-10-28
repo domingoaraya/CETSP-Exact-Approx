@@ -15,23 +15,21 @@ RESULT_COLUMNS = [
     "Cuts", "DFJ_Cuts", "Sub_Failures",
 ]
 
-# Number of decimals used when comparing radii keys between the CSV and the
-# values computed at runtime (guards against float repr noise such as
-# 0.12500000000000003 vs 0.125).
+# Decimals used to compare the radii of a CSV row with the values computed at runtime
 KEY_DECIMALS = 8
 
 
 def result_key(formulation, n, r_min, r_max, instance):
-    """Canonical key identifying one (configuration, instance) run."""
+    """Key identifying one (configuration, instance) run."""
     return (str(formulation), int(n), round(float(r_min), KEY_DECIMALS),
             round(float(r_max), KEY_DECIMALS), int(instance))
 
 
 def load_completed_runs(outfile):
     """
-    Reads an existing results CSV and returns the set of keys already solved.
-    Returns an empty set if the file does not exist or is empty.
-    Raises ValueError if the header does not match RESULT_COLUMNS.
+    Returns the keys of the runs recorded in an existing results CSV (empty
+    set if there is none). Raises ValueError on a header that does not match
+    RESULT_COLUMNS.
     """
     if not os.path.exists(outfile) or os.path.getsize(outfile) == 0:
         return set()
@@ -52,15 +50,15 @@ def load_completed_runs(outfile):
                 completed.add(result_key(row["Formulation"], row["n"], row["r_min"],
                                          row["r_max"], row["Instance"]))
             except (KeyError, ValueError):
-                # Skip malformed / partially written trailing rows
+                # Malformed or partially written trailing row
                 continue
     return completed
 
 
 class ResultsWriter:
     """
-    Appends result rows to a CSV as they are produced, flushing after each
-    write so that an interrupted run leaves a usable file behind.
+    Appends result rows to a CSV, flushing after each write so that an
+    interrupted run leaves a usable file.
     """
     def __init__(self, outfile):
         self.outfile = outfile
@@ -91,11 +89,9 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
                    cut_type, strengthen, optimize_coefficients, threads, gurobi_log=None,
                    symmetry_breaking=False):
     """
-    Solves a single instance and returns a dict with the metric columns
-    (everything in RESULT_COLUMNS except the identifying key).
-
-    If gurobi_log is given, the solver's log for this instance is written to
-    that file (console output stays off).
+    Solves one instance with one configuration and returns its metric columns
+    (RESULT_COLUMNS without the identifying key). With gurobi_log, the Gurobi
+    log is written to that file.
     """
     cetsp_data = CETSPData.from_file(instance_path)
 
@@ -113,7 +109,7 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
     )
     model.build()
     if gurobi_log:
-        # build() turns all solver output off; re-enable it into a file only.
+        # build() turns solver output off; re-enable it into a file only
         model.model.Params.OutputFlag = 1
         model.model.Params.LogToConsole = 0
         model.model.Params.LogFile = gurobi_log
@@ -122,9 +118,8 @@ def solve_instance(instance_path, model_type, time_limit, extended, decompositio
     summary = model.get_solution_summary()
 
     if isinstance(summary, dict):
-        # A closed master is reported as Optimal even when the verified upper
-        # bound (recomputed from the incumbent tour) does not match the bound;
-        # the Gap column keeps that information for a later review.
+        # Status is Gurobi's; a closed model with a gap left by the recomputed
+        # upper bound is still reported as Optimal, with the gap in its column
         if model.model.Status == GRB.OPTIMAL:
             status = "Optimal"
         elif model.model.Status == GRB.SUBOPTIMAL:
@@ -166,16 +161,14 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
              optimize_coefficients=False, threads=0, gurobi_log_dir=None,
              symmetry_breaking=False):
     """
-    Runs a test for a given configuration on a set of instances.
-
-    Instances whose key is already in `completed` are skipped. Each newly
-    solved instance is written to `writer` immediately and added to
-    `completed`. Returns the number of instances solved in this call.
+    Runs one configuration on the instances of one (n, r_min, r_max) cell,
+    generating the instance files if needed. Instances already in `completed`
+    are skipped; each solved instance is written to `writer` and added to
+    `completed`. Returns the number of instances solved.
     """
     folder = f"Instances/{n}_{r_min}_{r_max}"
     os.makedirs(folder, exist_ok=True)
 
-    # Generate instances if they don't exist
     current_instances = os.listdir(folder)
     if len(current_instances) < repetitions:
         for i in range(len(current_instances), repetitions):
@@ -196,7 +189,7 @@ def run_test(repetitions, n, r_min, r_max, model_type, formulation_name, writer,
         if strengthen:
             print(f"Using DFJ strengthening")
         if optimize_coefficients:
-            print("Optimising the dual cut coefficients")
+            print("Optimizing the dual cut coefficients")
         if symmetry_breaking:
             print("Fixing the tour orientation (no reverse-tour cuts)")
         skipped = repetitions - len(pending)
@@ -256,26 +249,16 @@ if __name__ == "__main__":
     parser.add_argument("--extended", type=str, nargs='+', default=['False', 'True'], choices=['False', 'True'], help="Use extended formulation (True/False).")
     parser.add_argument("--sbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for sequence model decomposition.")
     parser.add_argument("--pbf_cut_type", type=str, nargs='+', default=None, choices=['dual', 'enumerative', 'dual+enumerative'], help="Cut type for perspective model decomposition.")
-    parser.add_argument("--strengthen", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Use DFJ cut strengthening at root node (True/False).")
-    parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimise the PBF dual cut coefficients (True/False).")
+    parser.add_argument("--strengthen", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Separate DFJ cuts at the root node (True/False).")
+    parser.add_argument("--optimize_coefficients", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Optimize the PBF dual cut coefficients (True/False).")
     parser.add_argument("--threads", type=int, default=0, help="Gurobi threads per model. 0 lets Gurobi choose, 1 forces a single thread.")
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
-    parser.add_argument("--symmetry_breaking", type=str, nargs='+', default=['False'], choices=['False', 'True'],
-                        help="Fix the orientation of the tour in every model solved from scratch "
-                             "(depot's successor labelled lower than its predecessor), and do not "
-                             "separate the reverse-tour decomposition cuts. Label suffix -B.")
-    parser.add_argument("--gurobi_log_dir", type=str, default=None,
-                        help="If set, write one Gurobi log file per instance into this directory "
-                             "(console output stays off). Useful for post-mortem of crashes or "
-                             "numerical trouble.")
-    parser.add_argument("--outfile", type=str, default="Results/experiment_results.csv",
-                        help="CSV file where results are appended as each instance finishes. "
-                             "If the file already exists, runs already recorded in it are skipped, "
-                             "so re-running the same command resumes an interrupted experiment.")
+    parser.add_argument("--symmetry_breaking", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Fix the tour orientation and skip the reverse-tour cuts (True/False).")
+    parser.add_argument("--gurobi_log_dir", type=str, default=None, help="Directory for one Gurobi log per instance.")
+    parser.add_argument("--outfile", type=str, default="Results/experiment_results.csv", help="Results CSV; rows are appended as instances finish, and runs already in it are skipped.")
 
     args = parser.parse_args()
 
-    # Convert string arguments to boolean where necessary
     decomposition_options = [True if d == 'True' else False for d in args.decomposition]
     extended_options = [True if e == 'True' else False for e in args.extended]
     strengthen_options = [True if s == 'True' else False for s in args.strengthen]
@@ -285,8 +268,7 @@ if __name__ == "__main__":
     configurations = []
     for model_type_val in args.model_type:
         if model_type_val == 'BS':
-            # BS carries its own decomposition and refinement loop; the
-            # extended, cut-type and strengthening switches do not apply.
+            # BS has its own decomposition; extended, cut type and strengthening do not apply
             for sb_val in sb_options:
                 configurations.append({
                     'model_type': 'BS',
@@ -302,12 +284,12 @@ if __name__ == "__main__":
         for decomposition_val in decomposition_options:
             for extended_val in extended_options:
                 for strengthen_val, oc_val, sb_val in product(strengthen_options, oc_options, sb_options):
-                    # DFJ strengthening is only valid for arc and cont formulations
+                    # DFJ separation exists for the arc-based models only
                     if strengthen_val and model_type_val not in ['arc', 'perspective']:
                         continue
 
                     if decomposition_val and model_type_val in ['seq', 'perspective']:
-                        # Determine which cuts to use based on the model type
+                        # Default cuts: dual on the plain masters, enumerative on the extended ones
                         if model_type_val == 'seq':
                             if args.sbf_cut_type is None:
                                 cuts_to_use = ['enumerative'] if extended_val else ['dual']
@@ -315,14 +297,12 @@ if __name__ == "__main__":
                                 cuts_to_use = args.sbf_cut_type
                         else:  # perspective
                             if args.pbf_cut_type is None:
-                                cuts_to_use = ['enumerative'] if extended_val else ['dual'] # Por determinar estos defaults
+                                cuts_to_use = ['enumerative'] if extended_val else ['dual']
                             else:
                                 cuts_to_use = args.pbf_cut_type
 
-                        # Build the configuration using the determined cuts
                         for cut_type_val in cuts_to_use:
-                            # Coefficient optimisation only changes the perspective
-                            # dual cut; the False variant already covers the rest.
+                            # Coefficient optimization only changes the PBF dual cut
                             if oc_val and not (model_type_val == 'perspective'
                                                and 'dual' in cut_type_val):
                                 continue

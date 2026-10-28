@@ -1,15 +1,15 @@
 """
-Optimal coefficient completion for the PBF dual cut.
+Coefficient completion for the PBF dual cut.
 
-For an arc outside the support of x_hat the dual is unconstrained, so any
-gamma with ||gamma|| <= 1 gives a valid cut. Minimising over that ball gives the
-strongest one. Per arc the problem is
+On an arc (i, j) outside the support of the current tour, any gamma in the unit
+ball gives a valid cut; the strongest one minimizes
 
-    min_{||gamma|| <= 1}  <c, gamma> + r_1 ||gamma - eta_1|| + r_2 ||gamma - eta_2||
+    h(gamma) = <c_j - c_i, gamma> + r_i ||gamma - eta_i|| + r_j ||gamma - eta_j||
 
-with c = c_j - c_i, solved by a projected Weiszfeld iteration after a closed-form
-check of the two non-smooth points. The returned coefficient includes the
-constant c_i.eta_i - c_j.eta_j but not m_ij, which the caller adds.
+over the ball (see the paper). The minimizer is approximated by a closed-form
+test of the two kinks of h followed by a projected Weiszfeld iteration. The
+returned coefficient includes c_i.eta_i - c_j.eta_j but not m_ij, which the
+caller adds.
 """
 import numpy as np
 from numba import njit
@@ -32,6 +32,7 @@ def pack_instance(data):
 
 @njit
 def _h(gx, gy, cx, cy, r1, r2, e1x, e1y, e2x, e2y):
+    """h(gamma) for gamma = (gx, gy), c = (cx, cy), anchors e1, e2 and weights r1, r2."""
     ax = gx - e1x
     ay = gy - e1y
     bx = gx - e2x
@@ -42,7 +43,7 @@ def _h(gx, gy, cx, cy, r1, r2, e1x, e1y, e2x, e2y):
 
 @njit
 def _anchor_ok(Gx, Gy, r, ex, ey):
-    """Is 0 in G + r*B + N_B(eta)? G is the smooth part of dh at the anchor."""
+    """Optimality test of an anchor: 0 in G + r B + N_B(eta), where G is the smooth part of the subdifferential of h there."""
     ne2 = ex * ex + ey * ey
     nG2 = Gx * Gx + Gy * Gy
     if ne2 < _INTERIOR:
@@ -56,8 +57,9 @@ def _anchor_ok(Gx, Gy, r, ex, ey):
 @njit
 def _anchor_point(cx, cy, r1, r2, e1x, e1y, e2x, e2y):
     """
-    Closed-form test of the non-smooth points, which the iteration cannot handle.
-    Returns (code, gx, gy): 0 none, 1 eta_1, 2 eta_2, 3 merged.
+    Closed-form optimality test of the kinks of h, which the iteration cannot
+    reach. Returns (code, gx, gy) with code 0 if none is optimal, 1 for eta_1,
+    2 for eta_2, and 3 for their common value when they coincide.
     """
     dx = e1x - e2x
     dy = e1y - e2y
@@ -81,20 +83,26 @@ def _anchor_point(cx, cy, r1, r2, e1x, e1y, e2x, e2y):
 
 @njit
 def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
-    """Minimiser of h over the unit ball."""
+    """
+    Approximate minimizer of h over the unit ball: the kinks in closed form,
+    then max_iter projected Weiszfeld steps. The result is never worse than
+    gamma = 0 or either anchor, so the cut is at least as strong as the plain
+    completion and stays tight on reorderings of straight pass-through
+    clusters (see the paper).
+    """
     code, ax0, ay0 = _anchor_point(cx, cy, r1, r2, e1x, e1y, e2x, e2y)
     if code != 0:
         return ax0, ay0
 
     nc = sqrt(cx * cx + cy * cy)
     if r1 == 0.0 and r2 == 0.0:
-        # h is linear; the minimiser is on the circle.
+        # h is linear; the minimizer is on the circle.
         if nc > 0.0:
             return -cx / nc, -cy / nc
         return 0.0, 0.0
 
-    # Balance point of the three forces acting on gamma, each weighted by its
-    # magnitude: the two anchor pulls (r_1, r_2) and the linear pull (||c||).
+    # Starting point: balance of the three pulls (anchors weighted by r_1, r_2,
+    # linear term by ||c||), projected onto the ball; gamma = 0 if better.
     den = r1 + r2 + nc
     gx = (r1 * e1x + r2 * e2x - cx) / den
     gy = (r1 * e1y + r2 * e2y - cy) / den
@@ -115,7 +123,7 @@ def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
         d1 = sqrt(ax * ax + ay * ay)
         db = sqrt(bx * bx + by * by)
         if d1 == 0.0 or db == 0.0:
-            # Landed exactly on a cleared anchor; feasible, so stop here.
+            # On an anchor: feasible, stop.
             break
         w1 = r1 / d1
         w2 = r2 / db
@@ -130,13 +138,8 @@ def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
             gx = wx
             gy = wy
 
-    # Never return a point worse than the anchors themselves. Besides being a
-    # cheap safeguard for the fixed iteration budget, this is what makes the
-    # cut tight on all reorderings of a straight pass-through cluster: there
-    # eta_i = eta_j = u up to solver noise, and h(u) is exactly the value that
-    # telescopes along any order of the cluster (see the tightness proposition).
-    # The anchors are projected onto the ball first: optimal etas lie in it, but
-    # solver output can exceed norm 1 by rounding.
+    # Keep the best of the iterate and the two anchors (projected onto the
+    # ball: solver output can exceed norm 1 by rounding).
     hg = _h(gx, gy, cx, cy, r1, r2, e1x, e1y, e2x, e2y)
     s1 = 1.0 / max(1.0, sqrt(e1x * e1x + e1y * e1y))
     h1 = _h(e1x * s1, e1y * s1, cx, cy, r1, r2, e1x, e1y, e2x, e2y)
@@ -151,7 +154,7 @@ def _min_h(cx, cy, r1, r2, e1x, e1y, e2x, e2y, max_iter):
 
 @njit
 def fill_coefficients(centers, radii, etas, succ, C_out, max_iter):
-    """Write the optimised C_ij into C_out for every arc outside the support."""
+    """Writes the optimized C_ij into C_out for every arc (i, j) with j != succ[i]; support arcs are left untouched."""
     n = centers.shape[0]
     ce = np.empty(n)
     for i in range(n):
@@ -177,7 +180,7 @@ def fill_coefficients(centers, radii, etas, succ, C_out, max_iter):
 
 
 def _warmup():
-    """Compile the call tree at import, not inside a Gurobi callback."""
+    """Compiles the kernels at import time rather than inside a Gurobi callback."""
     centers = np.ascontiguousarray([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     radii = np.ascontiguousarray([0.0, 0.5, 0.5], dtype=np.float64)
     etas = np.ascontiguousarray([[0.1, 0.2], [0.3, -0.1], [0.3, -0.1]], dtype=np.float64)
