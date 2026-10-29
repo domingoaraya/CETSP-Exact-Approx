@@ -25,7 +25,7 @@ The experiments can be executed using the `run_experiment.py` script. The script
 ```bash
 python run_experiment.py
 ```
-This command will run the experiments with default parameters, i.e., those used for the results presented in the paper.
+This runs 12 configurations — the three formulations, each monolithic, approximated, decomposed, and both — over 135 instances (`n` of 10, 15 and 20, nine radius regimes, five each), at up to 600 s per run. It is not the configuration behind `Results/`, which added `BS`, the `-S`, `-OC` and `-B` modifiers, `n` up to 30, and a 1800 s limit.
 
 ### Command-line parameters
 Experiments can be customized using the following parameters:
@@ -75,17 +75,22 @@ Results are keyed by a label built from the configuration, e.g. `PBF-A-D-dual-OC
 
 ## Verification
 
-Two scripts check that the implementation is sound. Both exit non-zero on failure, so either can gate a commit.
+Three checks, each exiting non-zero on failure. The first two are development checks: they exercise the implementation on small throwaway instances and say nothing about the runs in `Results/`. Only `check_bounds.py` reads reported results.
 
 ```bash
 python utils/check_formulations.py
 ```
-Solves the same instances with every formulation variant and verifies they agree: the reported bound matches the tour actually returned, exact formulations reach the same optimum, and the relaxations bracket them. Takes a few minutes on the default grid.
+Solves small instances with all 82 configurations `run_experiment.py` can build and verifies they agree: the reported bound matches the tour actually returned, exact formulations reach the same optimum, and the relaxations bracket them. Run it after changing model building or cut generation. About 10 minutes on the default grid.
 
 ```bash
 python utils/check_cut_coefficients.py
 ```
-Checks the PBF cut coefficient kernel in isolation, without solving any instance: feasibility, strength against the trivial completion, and agreement with an exact conic solve.
+Checks the PBF cut coefficient kernel on random draws, without solving any instance: validity, strength against the trivial completion, and agreement with an exact conic solve. Run it after changing `classes/cut_coefficients.py`.
+
+```bash
+python utils/check_bounds.py
+```
+Checks a results file for bound crossovers: no run may report a lower bound above its own upper bound, and no instance may have its best lower bound above its best upper bound. Reads `Results/experiment_results_all.csv` unless given another file, and runs in a second. Run it on any results file before using its numbers.
 
 ## Repository Structure
 
@@ -105,6 +110,7 @@ E&AF-CETSP/
 │   ├───paper_results.csv
 │   └───relaxation_gaps_all.csv
 ├───utils/
+│   ├───check_bounds.py
 │   ├───check_cut_coefficients.py
 │   ├───check_formulations.py
 │   ├───instance_handler.py
@@ -135,6 +141,7 @@ E&AF-CETSP/
 - **`plots.py`**: Performance profiles and head-to-head scatter plots over any
   set of procedures, with axis extents read off the data and a color per
   formulation that does not change when a figure is filtered.
+- **`check_bounds.py`**: Bound-consistency check over a results file.
 - **`check_cut_coefficients.py`**: Sanity check for the cut coefficient kernel.
 - **`check_formulations.py`**: Cross-formulation sanity check.
 - **`instance_handler.py`**: Helper functions for creating, saving, and loading CETSP instances.

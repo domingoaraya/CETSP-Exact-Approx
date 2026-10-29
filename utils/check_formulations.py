@@ -1,8 +1,11 @@
 """
-Cross-formulation sanity check.
+Cross-formulation sanity check, for use while changing the implementation.
 
-Solves the same instances with every available formulation and verifies that
-they agree. The concern is correctness rather than performance: a formulation
+Solves small throwaway instances with the 25 configurations in CONFIGURATIONS
+and verifies that they agree. It says nothing about the runs reported in
+Results/: those use larger instances and the -S and -B modifiers, which this
+does not exercise (the models are built without strengthen or
+symmetry_breaking). Use check_bounds.py on a results file instead. The concern is correctness rather than performance: a formulation
 that reports a wrong bound still looks like a successful run, so the practical
 way to detect one is to make the formulations contradict each other.
 
@@ -57,23 +60,9 @@ C6  the approximated formulations bracket the exact ones (per cell)
 
 TOLERANCE AND MIPGap
 --------------------
---tol is an absolute bound on every comparison. It has to sit above the
-residual noise of a correct run and below the smallest error worth catching.
-The formulations that carry conic constraints on the master rather than in an
-exact subproblem (seq and perspective in full MISOCP form) set that noise
-floor, at order 1e-4, so the default of 1e-3 leaves roughly an order of
-magnitude on either side. Raise it for much larger instances, where an
-absolute bound becomes relatively tighter.
-
-MIPGap has to be forced below the tolerance for C3 to mean anything. Gurobi
-defaults to 1e-4 RELATIVE, which on a tour of length 20 permits a legitimate
-2e-3 absolute spread between two formulations that both report Optimal - wider
-than the tolerance itself. It cannot be made arbitrarily small either: solving
-a MISOCP to very high precision is not always achievable, and past roughly
-1e-6 some formulations terminate in a numerical failure instead, which would
-drop them from the comparison they exist to take part in. The default of 1e-6
-keeps the MIP slack about two orders below the tolerance while leaving every
-formulation solvable.
+--tol is an absolute bound on every comparison. --mip-gap has to stay well
+below it, or C3 compares two optima that Gurobi never had to agree on; it
+cannot go much under 1e-6 without some formulations failing numerically.
 """
 import argparse
 import csv
@@ -96,7 +85,7 @@ from utils.instance_handler import create_and_save_instance  # noqa: E402
 # 'dual+enumerative' run can converge on the strength of the enumerative cut
 # alone, which would mask a defective dual cut. The same reasoning makes
 # '-dual-OC' the diagnostic entry for coefficient optimization.
-CONFIGURATIONS = [
+BASE = [
     ('ABF',             'arc',         False, False, None,               False),
     ('SBF',             'seq',         False, False, None,               False),
     ('PBF',             'perspective', False, False, None,               False),
@@ -122,6 +111,26 @@ CONFIGURATIONS = [
     ('PBF-A-D-dual-OC', 'perspective', True,  True,  'dual',             True),
     ('PBF-A-D-DE-OC',   'perspective', True,  True,  'dual+enumerative', True),
     ('BS',             'BS',         False, False, None,               False),
+]
+
+# BASE fixes the model type, decomposition, approximation, cut type and
+# coefficient optimization. The remaining two modifiers are crossed in here, so
+# the list below is every configuration run_experiment.py can build: -S (DFJ
+# strengthening at the root), which CETSPModel applies to arc and perspective
+# only, and -B (symmetry breaking), whose two states are both reachable - the
+# reported runs use -B, while run_experiment defaults to without.
+def _label(base, strengthen, symmetry_breaking):
+    """Label of one configuration; the grammar orders -S before -OC before -B."""
+    if strengthen:
+        base = base.replace('-OC', '-S-OC') if base.endswith('-OC') else base + '-S'
+    return base + '-B' if symmetry_breaking else base
+
+
+CONFIGURATIONS = [
+    (_label(lbl, st, sb), mt, dec, ext, ct, oc, st, sb)
+    for lbl, mt, dec, ext, ct, oc in BASE
+    for st in ((False, True) if mt in ('arc', 'perspective') else (False,))
+    for sb in (False, True)
 ]
 
 STATUS = {2: 'Optimal', 3: 'Infeasible', 4: 'InfOrUnbd', 5: 'Unbounded',
@@ -159,7 +168,8 @@ def exact_tour_length(data, tour_arcs, mip_gap):
 
 
 def run_one(path, label, model_type, decomposition, extended, cut_type,
-            optimize_coefficients, nu, time_limit, mip_gap):
+            optimize_coefficients, strengthen, symmetry_breaking,
+            nu, time_limit, mip_gap):
     """Solves one instance with one configuration and returns its record."""
     data = CETSPData.from_file(path)
     rec = {'formulation': label, 'status': None, 'ub': None, 'lb': None,
@@ -169,7 +179,9 @@ def run_one(path, label, model_type, decomposition, extended, cut_type,
     try:
         model = CETSPModel(data, model_type=model_type, decomposition=decomposition,
                            extended=extended, nu=nu, cut_type=cut_type,
-                           optimize_coefficients=optimize_coefficients)
+                           optimize_coefficients=optimize_coefficients,
+                           strengthen=strengthen,
+                           symmetry_breaking=symmetry_breaking)
         model.build()
         model.model.setParam('MIPGap', mip_gap)
         model.optimize(time_limit)
@@ -302,8 +314,8 @@ def main():
             create_and_save_instance(n, r_min, r_max, inst)
 
         rows = []
-        for label, mt, dec, ext, ct, oc in configs:
-            rec = run_one(path, label, mt, dec, ext, ct, oc,
+        for label, mt, dec, ext, ct, oc, st, sb in configs:
+            rec = run_one(path, label, mt, dec, ext, ct, oc, st, sb,
                           args.nu, args.time_limit, args.mip_gap)
             rec.update(n=n, r_mean=rm, sigma=sg, instance=inst,
                        bracketing=is_bracketing(mt, ext, dec))
