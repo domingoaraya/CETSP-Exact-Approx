@@ -25,11 +25,21 @@ The experiments can be executed using the `run_experiment.py` script. The script
 ```bash
 python run_experiment.py
 ```
-This runs 12 configurations — the three formulations, each monolithic, approximated, decomposed, and both — over 135 instances (`n` of 10, 15 and 20, nine radius regimes, five each), at up to 600 s per run. It is not the configuration behind `Results/`, which added `BS`, the `-S`, `-OC` and `-B` modifiers, `n` up to 30, and a 1800 s limit.
+This runs 12 configurations — the three formulations, each monolithic, approximated, decomposed, and both — over 135 instances (`n` of 10, 15 and 20, nine radius regimes, five each), at up to 600 s per run. It is not the configuration behind the paper results, which added `BS`, the `-S`, `-OC` and `-B` modifiers, `n` up to 30, and a 1800 s limit.
+
+### Reproducing the reported formulations
+
+```bash
+python run_experiment.py --paper --n_nodes 15 20 25 30 --time_limit 1800 
+```
+`--paper` leaves only the 15 formulations used for the paper's results and ignores the formulation flags; the instance flags still apply. No single combination of the formulation flags produces exactly that set, which is why the flag exists. The remaining defaults already match the reported runs.
+
+This runs everything sequentially. Splitting the grid across processes is recommended, each with its own `--outfile`. Each file is restartable: re-running the same command skips what is already recorded.
 
 ### Command-line parameters
 Experiments can be customized using the following parameters:
 
+- `--paper`: Run only the 15 formulations reported in the paper, ignoring the formulation flags below. The instance parameters still apply.
 - `--time_limit`: Time limit for Gurobi solver in seconds (default: 600).
 - `--amount_of_instances`: Number of instances to test per configuration (default: 5).
 - `--nu`: Parameter for the extended formulation (default: 3).

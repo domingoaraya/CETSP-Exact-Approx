@@ -19,6 +19,43 @@ RESULT_COLUMNS = [
 KEY_DECIMALS = 8
 
 
+# The formulations reported in the paper, as
+# (model_type, decomposition, extended, cut_type, strengthen, optimize_coefficients).
+# All are symmetry-broken. Kept explicit because the flag cross-product cannot
+# express the set: --strengthen True drops seq and BS entirely, and the PBF dual
+# cut is reported with -OC while the enumerative one is not, so reproducing it
+# from the flags alone takes four separate invocations.
+PAPER_FORMULATIONS = [
+    ('arc',         False, False, None,          True,  False),
+    ('arc',         False, True,  None,          True,  False),
+    ('arc',         True,  False, None,          True,  False),
+    ('arc',         True,  True,  None,          True,  False),
+    ('seq',         False, False, None,          False, False),
+    ('seq',         False, True,  None,          False, False),
+    ('seq',         True,  False, 'dual',        False, False),
+    ('seq',         True,  True,  'dual',        False, False),
+    ('seq',         True,  True,  'enumerative', False, False),
+    ('perspective', False, False, None,          True,  False),
+    ('perspective', False, True,  None,          True,  False),
+    ('perspective', True,  False, 'dual',        True,  True),
+    ('perspective', True,  True,  'enumerative', True,  False),
+    ('perspective', True,  True,  'dual',        True,  True),
+    ('BS',          False, False, None,          False, False),
+]
+
+
+def paper_configurations(nu):
+    """The paper's 15 formulations as configuration dicts.
+
+    Fixes the formulations only; the instance grid, time limit and output file
+    stay under their usual flags.
+    """
+    return [{'model_type': mt, 'decomposition': dec, 'extended': ext,
+             'cut_type': ct, 'nu': nu if ext else None, 'strengthen': st,
+             'optimize_coefficients': oc, 'symmetry_breaking': True}
+            for mt, dec, ext, ct, st, oc in PAPER_FORMULATIONS]
+
+
 def result_key(formulation, n, r_min, r_max, instance):
     """Key identifying one (configuration, instance) run."""
     return (str(formulation), int(n), round(float(r_min), KEY_DECIMALS),
@@ -255,6 +292,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbosity", type=str, default='high', choices=['high', 'low'], help="Verbosity level for experiment output ('high' or 'low').")
     parser.add_argument("--symmetry_breaking", type=str, nargs='+', default=['False'], choices=['False', 'True'], help="Fix the tour orientation and skip the reverse-tour cuts (True/False).")
     parser.add_argument("--gurobi_log_dir", type=str, default=None, help="Directory for one Gurobi log per instance.")
+    parser.add_argument("--paper", action="store_true", help="Run exactly the formulations reported in the paper, ignoring the formulation flags. The instance flags still apply; the reported runs used --n_nodes 15 20 25 30 --r_mean 0.25 0.5 1 --sigma 0 0.2 0.5 --amount_of_instances 5 --time_limit 1800.")
     parser.add_argument("--outfile", type=str, default="Results/experiment_results.csv", help="Results CSV; rows are appended as instances finish, and runs already in it are skipped.")
 
     args = parser.parse_args()
@@ -329,6 +367,11 @@ if __name__ == "__main__":
                             'optimize_coefficients': False,
                             'symmetry_breaking': sb_val
                         })
+
+    if args.paper:
+        configurations = paper_configurations(args.nu)
+        print('Paper mode: %d formulations; formulation flags ignored'
+              % len(configurations))
 
     completed = load_completed_runs(args.outfile)
     if completed:
