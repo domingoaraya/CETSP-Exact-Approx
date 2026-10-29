@@ -9,18 +9,22 @@ distinguishes the two, so they run independently of any solve.
 Six checks, over random draws plus forced degenerate cases:
 
   K1  ||gamma|| <= 1. Cut validity rests on this alone.
-  K2  h(gamma) vs h(0): the completion should not come out weaker than the
-      trivial one it replaces. The start is not gamma = 0, so monotone descent
-      does not make this exact; it is checked as a rate and a magnitude.
+  K2  h(gamma) vs h(0): the optimized completion must not come out weaker than
+      the trivial gamma = 0 one that -OC replaces. Whether optimizing is worth
+      doing is settled; this guards against a change that silently undoes it.
+      The start is not gamma = 0, so monotone descent does not make this exact;
+      it is checked as a rate and a magnitude.
   K3  at a high iteration budget, h(gamma) matches an exact SOCP solve. Tests the
       algorithm, independently of the production budget.
-  K4  at the production budget, the fraction of available gain retained. Reported
-      as a distribution; tests the budget, independently of the algorithm.
+  K4  at the production budget, the fraction of available gain retained,
+      reported as a distribution. MAX_ITER is already tuned; this guards
+      against it being lowered, or the descent slowing, without anyone
+      noticing. Independent of K3, which tests the algorithm itself.
   K5  the anchor codes against the closed-form conditions, re-derived here.
   K6  the assembled coefficient equals its definition, and the gamma = 0 case
       reproduces the trivial completion in classes/solver.py exactly.
 
-Exits non-zero if any check fails, so it can gate a commit.
+Exits non-zero if any check fails.
 """
 import argparse
 import os
