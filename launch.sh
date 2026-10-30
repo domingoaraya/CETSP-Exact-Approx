@@ -96,7 +96,6 @@ CONFIGS=(
   "PBF-A-D-enum-S-B|--model_type perspective --decomposition True --extended True --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-A-S-B|--model_type perspective --decomposition False --extended True --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "PBF-D-dual-S-OC-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients True --pbf_cut_type dual --symmetry_breaking True"
-  "PBF-D-enum-S-B|--model_type perspective --decomposition True --extended False --strengthen True --optimize_coefficients False --pbf_cut_type enumerative --symmetry_breaking True"
   "PBF-S-B|--model_type perspective --decomposition False --extended False --strengthen True --optimize_coefficients False --symmetry_breaking True"
   "SBF-A-B|--model_type seq --decomposition False --extended True --strengthen False --optimize_coefficients False --symmetry_breaking True"
   "SBF-A-D-dual-B|--model_type seq --decomposition True --extended True --strengthen False --optimize_coefficients False --sbf_cut_type dual --symmetry_breaking True"
