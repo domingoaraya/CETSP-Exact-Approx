@@ -377,7 +377,7 @@ def profile_axes(ax, df, formulations, labels=None, colors=None,
     ax.set_xlim(-5, second_split + gap_width + 5)
     ax.set_ylim(bottom=-1)
     ax.set_xlabel('Time (s)  |  Gap (%)')
-    ax.set_ylabel('Instances solved')
+    ax.set_ylabel('Number of instances')
     if legend:
         ax.legend(loc=legend_loc, fontsize='small')
 
